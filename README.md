@@ -43,8 +43,11 @@ wizard (root only): welcome, hostname, root password, optional
 user, disk confirm, progress bar, reboot. It writes boot sector +
 kernel (161 sectors) to LBA 0, verifies, then flushes hostname +
 users to the user DB so the installed system boots with them.
-Tested end-to-end (screenshots): full wizard, `make run-hdd`,
-login as the wizard-created user.
+Dialogs are modal boxes (blue screen, gray box, shadow, red
+title, red buttons); errors use the same style (no-disk offers
+Reboot). Tested end-to-end (screenshots): error dialog +
+reboot, every wizard dialog, completion, HDD boot, login as the
+wizard-created user.
 
 ## Users (TUI login + database)
 Boot drops to a `hostname login:` prompt checked against

@@ -6,6 +6,9 @@
 
 #include "drivers.h"
 
+/* centered modal dialog; returns button index, -1 on Esc */
+int tui_dialog(const char *title, const char *body, const char **buttons,
+               int n);
 /* menu; returns selected index, -1 on Esc */
 int tui_menu(const char *title, const char *body, const char **items, int n);
 /* line input with default; returns len, -1 on Esc */

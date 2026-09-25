@@ -1063,30 +1063,40 @@ static int b_install(int argc, char **argv, const char *in) {
     (void)argc; (void)argv; (void)in;
     ata_dev_t d;
     if (shell_uid() != 0) {
-        sh_eprint("install: root only (login as root)\n");
+        tui_msg("Error", "install: root only (login as root)");
+        vga_clear();
         return 1;
     }
     if (ata_info(0, &d)) {
-        sh_eprint("install: no ATA primary master disk found\n");
+        static const char *rb[] = { "Reboot" };
+        if (tui_dialog("Error",
+                       "No hard disks detected on this computer.\n"
+                       "Cannot install BleeOS.",
+                       rb, 1) == 0)
+            reboot();
+        vga_clear();
         return 1;
     }
     if (d.sectors < INSTALL_SECTORS) {
-        sh_eprint("install: disk too small (need 161 sectors)\n");
+        tui_msg("Error", "install: disk too small (need 161 sectors)");
+        vga_clear();
         return 1;
     }
     if (INSTALL_SRC[510] != 0x55 || INSTALL_SRC[511] != 0xAA) {
-        sh_eprint("install: boot image not intact in RAM;"
-                  " reboot from floppy and retry\n");
+        tui_msg("Error", "install: boot image not intact in RAM;\n"
+                "reboot from floppy and retry");
+        vga_clear();
         return 1;
     }
 
     /* 1. welcome */
     {
-        static const char *items[] = { "Install BleeOS", "Back to shell" };
-        if (tui_menu("BleeOS installer",
-                     "Welcome. This wizard erases a disk and\n"
-                     "installs BleeOS, then sets up hostname,\n"
-                     "passwords and users.", items, 2) != 0) {
+        static const char *btns[] = { "Install BleeOS", "Back to shell" };
+        if (tui_dialog("BleeOS installer",
+                       "Welcome. This wizard erases a disk and\n"
+                       "installs BleeOS, then sets up hostname,\n"
+                       "passwords and users.",
+                       btns, 2) != 0) {
             vga_clear();
             return 1;
         }
@@ -1130,9 +1140,9 @@ static int b_install(int argc, char **argv, const char *in) {
     }
     /* 4. optional normal user */
     {
-        static const char *items[] = { "Yes, create a user", "No, root only" };
-        if (tui_menu("Create user", "Add a non-root account?",
-                     items, 2) == 0) {
+        static const char *btns[] = { "Yes, create a user", "No, root only" };
+        if (tui_dialog("Create user", "Add a non-root account?",
+                       btns, 2) == 0) {
             static char name[32], nw[64];
             for (;;) {
                 if (tui_input("Create user", "Login name:",
@@ -1161,7 +1171,7 @@ static int b_install(int argc, char **argv, const char *in) {
     /* 5. disk confirm */
     {
         static char body[160], sz[16];
-        static const char *items[] = {
+        static const char *btns[] = {
             "Erase disk and install", "Go back"
         };
         int i = 0;
@@ -1175,7 +1185,7 @@ static int b_install(int argc, char **argv, const char *in) {
         t = " MB)\nALL DATA ON IT WILL BE DESTROYED.";
         while (*t) body[i++] = *t++;
         body[i] = 0;
-        if (tui_menu("Target disk", body, items, 2) != 0) {
+        if (tui_dialog("Target disk", body, btns, 2) != 0) {
             vga_clear();
             sh_print("Aborted.\n");
             return 1;
@@ -1234,12 +1244,12 @@ static int b_install(int argc, char **argv, const char *in) {
     }
     /* 7. done */
     {
-        static const char *items[] = { "Reboot now", "Back to shell" };
+        static const char *btns[] = { "Reboot now", "Back to shell" };
         tui_msg("Installation complete",
                 "BleeOS is on the disk. Boot it without\n"
                 "the floppy (`-boot order=c`).");
-        if (tui_menu("Finished", "Reboot into the new system?",
-                     items, 2) == 0)
+        if (tui_dialog("Finished", "Reboot into the new system?",
+                       btns, 2) == 0)
             reboot();
         vga_clear();
     }
