@@ -499,14 +499,14 @@ void apps_game_close(void) {
     wm_require_fps(0);
 }
 
-void apps_window_closed(int id) {
+void apps_doom_closed(int id) {
     if (dg_win && dg_win->id == id) {
         dg_win = 0;
         wm_require_fps(0);
     }
 }
 
-void apps_session_reset(void) {
+void apps_doom_reset(void) {
     dg_win = 0;
 }
 
