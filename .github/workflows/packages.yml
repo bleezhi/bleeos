@@ -1,0 +1,68 @@
+name: packages
+on:
+  push:
+    paths: ["packages/**", "docs/packages.json", "tools/mkblee.py"]
+  pull_request:
+    paths: ["packages/**", "docs/packages.json", "tools/mkblee.py"]
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Rebuild every package from source dirs
+        run: |
+          fail=0
+          for d in packages/*/; do
+            [ -f "$d/PKGINFO" ] || continue
+            n=$(basename "$d")
+            python3 tools/mkblee.py "$d" "/tmp/$n.blee" || fail=1
+            if ! cmp -s "/tmp/$n.blee" "packages/$n.blee"; then
+              echo "::error::packages/$n.blee is stale; run make pkgs"
+              fail=1
+            fi
+            if ! cmp -s "/tmp/$n.blee" "docs/$n.blee"; then
+              echo "::error::docs/$n.blee differs from packages/$n.blee"
+              fail=1
+            fi
+          done
+          exit $fail
+      - name: packages.json agrees with the built archives
+        run: |
+          python3 - <<'EOF'
+          import json, struct, sys
+
+          def fnv(data):
+              h = 2166136261
+              for b in data:
+                  h ^= b
+                  h = (h * 16777619) & 0xFFFFFFFF
+              return h
+
+          ix = json.load(open("docs/packages.json"))
+          seen = set()
+          for p in ix["packages"]:
+              fn = f"packages/{p['name']}.blee"
+              try:
+                  arc = open(fn, "rb").read()
+              except OSError:
+                  print(f"::error::missing {fn}"); sys.exit(1)
+              assert arc[:8] == b"BLEEPKG1", f"{fn}: bad magic"
+              o = 8
+              nl = struct.unpack("<H", arc[o:o+2])[0]; o += 2
+              name = arc[o:o+nl].decode(); o += nl
+              vl = struct.unpack("<H", arc[o:o+2])[0]; o += 2
+              ver = arc[o:o+vl].decode(); o += vl
+              nf = struct.unpack("<H", arc[o:o+2])[0]; o += 2
+              assert name == p["name"], f"{fn}: name mismatch"
+              assert ver == p["version"], f"{fn}: version mismatch"
+              assert nf == p["files"], f"{fn}: file count mismatch"
+              assert len(arc) == p["size"], f"{fn}: size mismatch"
+              assert fnv(arc[8:-4]) == struct.unpack("<I", arc[-4:])[0], \
+                  f"{fn}: checksum mismatch"
+              assert p["name"] not in seen, "duplicate name"
+              seen.add(p["name"])
+          print(f"packages.json OK: {len(seen)} packages")
+          EOF

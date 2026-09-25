@@ -100,7 +100,10 @@ ramfs files (`pkg install FILE`); run scripts with `run
 /pkg/<name>/...`. Commands: `list`, `info`, `install`,
 `install-hd`, `remove`. Build packages with `tools/mkblee.py`
 (`make pkgs` rebuilds samples); the `docs/` static site (GitHub
-Pages-ready) lists `packages.json` with downloads. Tested:
+Pages-ready) lists `packages.json` with downloads. Publish
+yours: add `packages/<name>/`, rebuild, index it, open a PR —
+CI rebuilds everything and rejects stale files or a disagreeing
+index (see `packages/README.md`). Tested:
 install/list/info/run/remove plus corrupt-archive rejection.
 
 ## GUI (`gui` command)

@@ -17,9 +17,18 @@
 (e.g. <code>dd if=hello.blee of=hdd.img bs=512 seek=2048
 conv=notrunc</code>), attach the disk, then
 <code>pkg install-hd 2048</code> in BleeOS.</p>
-<table id="pkgs"><thead><tr><th>Name</th><th>Version</th><th>Files</th>
+<table id="pkgs"><thead><tr><th>Name</th><th>Version</th><th>By</th><th>Files</th>
 <th>Size</th><th>Description</th><th>Download</th></tr></thead>
 <tbody></tbody></table>
+<h2>Publish yours</h2>
+<p>User packages are welcome. Fork the repo, add
+<code>packages/&lt;name&gt;/</code> (<code>PKGINFO</code> + files),
+run <code>make pkgs</code>, add your row to
+<code>docs/packages.json</code> (<code>by</code> = your handle), and
+open a pull request. CI rebuilds every package from source, rejects
+rule violations and stale files, and rejects an index that disagrees
+with the built archives. Merge is moderation. Full rules:
+<a href="https://github.com/bleezhi/bleeos/tree/main/packages">packages/</a>.</p>
 <h2>Make one</h2>
 <pre>mkdir -p mypkg
 printf 'name=mypkg\nversion=1.0\n' &gt; mypkg/PKGINFO
@@ -37,7 +46,7 @@ fetch('packages.json').then(r => r.json()).then(ix => {
     const tr = document.createElement('tr');
     const dl = document.createElement('a');
     dl.href = p.file; dl.textContent = p.file; dl.setAttribute('download', '');
-    for (const v of [p.name, p.version, p.files, p.size, p.desc]) {
+    for (const v of [p.name, p.version, p.by, p.files, p.size, p.desc]) {
       const td = document.createElement('td');
       td.textContent = v; tr.appendChild(td);
     }
@@ -46,7 +55,7 @@ fetch('packages.json').then(r => r.json()).then(ix => {
   }
 }).catch(() => {
   document.querySelector('#pkgs tbody').innerHTML =
-    '<tr><td colspan="6">Could not load packages.json</td></tr>';
+    '<tr><td colspan="7">Could not load packages.json</td></tr>';
 });
 </script>
 </body>

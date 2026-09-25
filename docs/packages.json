@@ -6,7 +6,8 @@
       "files": 2,
       "size": 163,
       "desc": "Demo: prints hello + whoami. Run: run /pkg/hello/hello.sh",
-      "file": "hello.blee"
+      "file": "hello.blee",
+      "by": "bleeos"
     },
     {
       "name": "quote",
@@ -14,7 +15,8 @@
       "files": 1,
       "size": 117,
       "desc": "Prints a quote. Run: run /pkg/quote/quote.sh",
-      "file": "quote.blee"
+      "file": "quote.blee",
+      "by": "bleeos"
     }
   ]
 }
