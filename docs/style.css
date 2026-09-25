@@ -1,0 +1,19 @@
+/* BleeOS site: dark, cyan accents, monospace. */
+:root { --bg: #0a0e1a; --fg: #dfe6f2; --dim: #8c96a8; --acc: #50aaff;
+        --box: #182036; --line: #2a3a5c; }
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg);
+       font-family: monospace, monospace; margin: 0; line-height: 1.5; }
+header { border-bottom: 1px solid var(--line); padding: 1em 2em; }
+header h1 { margin: 0; color: var(--acc); }
+nav a { color: var(--fg); margin-right: 1.5em; }
+nav a:hover { color: var(--acc); }
+main { max-width: 60em; margin: 0 auto; padding: 2em; }
+h2 { color: var(--acc); border-bottom: 1px solid var(--line); }
+code, pre { background: var(--box); }
+pre { padding: 1em; overflow-x: auto; border: 1px solid var(--line); }
+table { border-collapse: collapse; width: 100%; }
+th, td { border: 1px solid var(--line); padding: 0.5em 1em; text-align: left; }
+th { background: var(--box); color: var(--acc); }
+.dim { color: var(--dim); }
+footer { border-top: 1px solid var(--line); padding: 1em 2em; color: var(--dim); }

@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BleeOS packages</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+<h1>BleeOS packages</h1>
+<nav><a href="index.html">Home</a><a href="packages.html">Packages</a></nav>
+</header>
+<main>
+<h2>Index</h2>
+<p>Offline <code>.blee</code> files. Write one to raw disk sectors
+(e.g. <code>dd if=hello.blee of=hdd.img bs=512 seek=2048
+conv=notrunc</code>), attach the disk, then
+<code>pkg install-hd 2048</code> in BleeOS.</p>
+<table id="pkgs"><thead><tr><th>Name</th><th>Version</th><th>Files</th>
+<th>Size</th><th>Description</th><th>Download</th></tr></thead>
+<tbody></tbody></table>
+<h2>Make one</h2>
+<pre>mkdir -p mypkg
+printf 'name=mypkg\nversion=1.0\n' &gt; mypkg/PKGINFO
+echo 'echo hi' &gt; mypkg/hi.sh
+python3 tools/mkblee.py mypkg mypkg.blee</pre>
+<p class="dim">Limits: archive &le; 8192 bytes, paths &le; 64 chars,
+files &le; 768 bytes, 32 files max. Format: magic
+<code>BLEEPKG1</code>, name, version, entries, FNV-1a checksum.</p>
+</main>
+<footer>BleeOS package index.</footer>
+<script>
+fetch('packages.json').then(r => r.json()).then(ix => {
+  const tb = document.querySelector('#pkgs tbody');
+  for (const p of ix.packages) {
+    const tr = document.createElement('tr');
+    const dl = document.createElement('a');
+    dl.href = p.file; dl.textContent = p.file; dl.setAttribute('download', '');
+    for (const v of [p.name, p.version, p.files, p.size, p.desc]) {
+      const td = document.createElement('td');
+      td.textContent = v; tr.appendChild(td);
+    }
+    const td = document.createElement('td'); td.appendChild(dl);
+    tr.appendChild(td); tb.appendChild(tr);
+  }
+}).catch(() => {
+  document.querySelector('#pkgs tbody').innerHTML =
+    '<tr><td colspan="6">Could not load packages.json</td></tr>';
+});
+</script>
+</body>
+</html>

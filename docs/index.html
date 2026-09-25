@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BleeOS</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+<h1>BleeOS</h1>
+<nav><a href="index.html">Home</a><a href="packages.html">Packages</a></nav>
+</header>
+<main>
+<h2>A tiny 32-bit hobby OS</h2>
+<p>BleeOS boots from floppy, hard disk, or CD into a shell, a
+double-buffered GUI with a login screen, and a Debian-like text
+installer. Login accounts, an ATA driver, and a stub USB detector
+included. No network stack yet &mdash; packages travel on disk.</p>
+<h2>Try it</h2>
+<pre>git clone https://github.com/bleezhi/bleeos.git
+cd bleeos
+make run        # floppy + GUI (needs QEMU + KVM)
+make run-cd     # bootable ISO
+make run-install # floppy + blank HDD, then `install`
+make iso        # build bleeos.iso</pre>
+<h2>Packages</h2>
+<p>Offline <code>.blee</code> archives (scripts + data) installed with
+the in-OS <code>pkg</code> tool. Browse the <a href="packages.html">package
+index</a>, download a <code>.blee</code>, put it on an attached disk,
+and run:</p>
+<pre>pkg install-hd 2048
+pkg list
+run /pkg/hello/hello.sh</pre>
+<p class="dim">Default login: root / root. Packagers: see
+<code>tools/mkblee.py</code> and <code>packages/</code> in the repo.</p>
+</main>
+<footer>BleeOS &mdash; static site, serve <code>docs/</code> with GitHub Pages.</footer>
+</body>
+</html>

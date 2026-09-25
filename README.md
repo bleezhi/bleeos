@@ -41,7 +41,7 @@ ATA PIO driver (primary bus, LBA28, polled). The kernel reports a
 detected primary master at boot; `install` is a Debian-like TUI
 wizard (root only): welcome, hostname, root password, optional
 user, disk confirm, progress bar, reboot. It writes boot sector +
-kernel (161 sectors) to LBA 0, verifies, then flushes hostname +
+kernel (193 sectors) to LBA 0, verifies, then flushes hostname +
 users to the user DB so the installed system boots with them.
 Dialogs are modal boxes (blue screen, gray box, shadow, red
 title, red buttons); errors use the same style (no-disk offers
@@ -89,6 +89,19 @@ e.g. bad ATA sector counts).
 guest changes are needed and users stay volatile. Tested with
 `run-cd` (`-boot order=d`): boots to the login prompt, root shell
 works.
+
+## Packages (`pkg`, `run`, website)
+Offline package manager: `.blee` archives (magic `BLEEPKG1`, name,
+version, entries, FNV-1a checksum; <= 8192 bytes, paths <= 64,
+files <= 768 bytes) install scripts + data into `/pkg/<name>/`
+with a manifest and a registry. No network stack exists, so
+archives arrive on attached disks (`pkg install-hd LBA`) or as
+ramfs files (`pkg install FILE`); run scripts with `run
+/pkg/<name>/...`. Commands: `list`, `info`, `install`,
+`install-hd`, `remove`. Build packages with `tools/mkblee.py`
+(`make pkgs` rebuilds samples); the `docs/` static site (GitHub
+Pages-ready) lists `packages.json` with downloads. Tested:
+install/list/info/run/remove plus corrupt-archive rejection.
 
 ## GUI (`gui` command)
 

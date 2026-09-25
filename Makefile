@@ -11,13 +11,13 @@ QEMU=qemu-system-i386
 DISPLAY_BACKEND ?= $(if $(or $(DISPLAY),$(WAYLAND_DISPLAY)),sdl,none)
 
 # MBR loads this many sectors (must cover the whole stage2 binary)
-STAGE2_SECTORS=160
+STAGE2_SECTORS=192
 
 CFLAGS=-m32 -march=i386 -mno-mmx -mno-sse -mno-sse2 -ffreestanding -nostdlib -nostartfiles -nodefaultlibs \
        -fno-builtin -fno-stack-protector -fno-pie -no-pie \
        -Wall -Wextra -O2 -std=gnu11
 
-OBJS=kernel_entry.o drivers.o bootmenu.o shell.o kernel.o vbe.o gfx.o mouse.o wm.o apps.o login.o ata.o users.o uhci.o usb.o tui.o
+OBJS=kernel_entry.o drivers.o bootmenu.o shell.o kernel.o vbe.o gfx.o mouse.o wm.o apps.o login.o ata.o users.o uhci.o usb.o tui.o pkg.o
 
 all: os.img
 
@@ -67,6 +67,15 @@ users.o: users.c users.h shell.h drivers.h
 
 tui.o: tui.c tui.h drivers.h
 	$(CC) $(CFLAGS) -c tui.c -o tui.o
+
+pkg.o: pkg.c pkg.h shell.h drivers.h
+	$(CC) $(CFLAGS) -c pkg.c -o pkg.o
+
+# sample packages + website copies (keep sizes in docs/packages.json true)
+pkgs:
+	python3 tools/mkblee.py packages/hello packages/hello.blee
+	python3 tools/mkblee.py packages/quote packages/quote.blee
+	cp packages/hello.blee packages/quote.blee docs/
 
 uhci.o: uhci.c uhci.h drivers.h
 	$(CC) $(CFLAGS) -c uhci.c -o uhci.o

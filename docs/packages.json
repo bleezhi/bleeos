@@ -1,0 +1,20 @@
+{
+  "packages": [
+    {
+      "name": "hello",
+      "version": "1.0",
+      "files": 2,
+      "size": 163,
+      "desc": "Demo: prints hello + whoami. Run: run /pkg/hello/hello.sh",
+      "file": "hello.blee"
+    },
+    {
+      "name": "quote",
+      "version": "1.1",
+      "files": 1,
+      "size": 117,
+      "desc": "Prints a quote. Run: run /pkg/quote/quote.sh",
+      "file": "quote.blee"
+    }
+  ]
+}

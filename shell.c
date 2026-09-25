@@ -10,6 +10,7 @@
 #include "users.h"
 #include "uhci.h"
 #include "tui.h"
+#include "pkg.h"
 
 /* ================= string helpers ================= */
 static void scpy(char *d, const char *s) { while ((*d++ = *s++)) ; }
@@ -247,6 +248,7 @@ static int fs_write(const char *path, const char *data, u32 len, int append) {
 }
 
 /* file access for other modules (users DB) */
+static int rm_one(int idx);
 int shell_fread(const char *path, char *buf, u32 cap) {
     int idx = fs_resolve(path);
     if (idx < 0 || fs[idx].is_dir || cap == 0) return -1;
@@ -258,6 +260,19 @@ int shell_fread(const char *path, char *buf, u32 cap) {
 }
 int shell_fwrite(const char *path, const char *data, u32 len) {
     return fs_write(path, data, len, 0);
+}
+int shell_mkdir(const char *path) {
+    int p;
+    char leaf[24];
+    if (fs_split(path, &p, leaf) != 0) return -1;
+    if (fs_child((u8)p, leaf) >= 0) return 0;   /* exists: ok */
+    return fs_alloc((u8)p, leaf, 1) < 0 ? -1 : 0;
+}
+/* remove a file or dir tree (like rm -r); 0 ok. Never /. */
+int shell_rm(const char *path) {
+    int idx = fs_resolve(path);
+    if (idx <= 0) return -1;
+    return rm_one(idx);
 }
 
 static void fs_init(void) {
@@ -834,6 +849,9 @@ static int b_useradd(int argc, char **argv, const char *in);
 static int b_userdel(int argc, char **argv, const char *in);
 static int b_users(int argc, char **argv, const char *in);
 static int b_usb(int argc, char **argv, const char *in);
+static int b_run(int argc, char **argv, const char *in);
+static int b_pkg(int argc, char **argv, const char *in);
+static int run_line(char *line);
 static int read_new_pass(char *buf, u32 cap);
 static int b_vgaregs(int argc, char **argv, const char *in);
 /* man pages */
@@ -894,7 +912,7 @@ static const char MAN_INSTALL[] =
     "install - Debian-like OS installer (TUI)\nUsage: install\n"
     "Stepped wizard (root only): welcome, hostname, root\n"
     "password, optional user, disk confirm, progress bar.\n"
-    "Writes boot sector + kernel (161 sectors) to LBA 0 of\n"
+    "Writes boot sector + kernel (193 sectors) to LBA 0 of\n"
     "the ATA primary master and verifies. Hostname, users\n"
     "and passwords persist on installed systems.\n";
 static const char MAN_USERS[] =
@@ -912,6 +930,18 @@ static const char MAN_USB[] =
     "Shows the UHCI controller I/O base and per-port attach\n"
     "state. No transfers, no enumeration: PS/2 stays the input\n"
     "path. Needs -device piix3-usb-uhci to show anything.\n";
+static const char MAN_RUN[] =
+    "run - execute a script file\nUsage: run FILE\n"
+    "Runs each line as a shell command (skips blanks and\n"
+    "# comments). Stops early on exit/logout.\n";
+static const char MAN_PKG[] =
+    "pkg - offline package manager\n"
+    "Usage: pkg list | info NAME | install FILE |\n"
+    "       pkg install-hd LBA | remove NAME\n"
+    ".blee archives install scripts+data into /pkg/<name>/\n"
+    "(registry in /pkg/registry). No network: archives come\n"
+    "from ramfs files or raw disk sectors (see the website).\n"
+    "Run installed scripts with `run /pkg/<name>/...`.\n";
 static const char MAN_SHELL[] =
     "Shell syntax: ' \" quotes, \\ escape, $VAR $? $$,\n"
     "; && || lists, > FILE >> FILE (append), < FILE (stdin).\n"
@@ -924,6 +954,7 @@ static int b_help(int argc, char **argv, const char *in) {
              "  pwd ls cd mkdir touch rm cat env export unset sleep uptime date\n"
              "  history true false test exit reboot halt poweroff gui vgaregs\n"
              "  install logout su passwd useradd userdel users usb\n"
+             "  run pkg\n"
              "Syntax: ; && ||  $VAR $?  > >> <  quotes  (see `man shell`)\n");
     return 0;
 }
@@ -970,6 +1001,8 @@ static const cmd_t cmds[] = {
     {"userdel", "delete user", MAN_USERS, b_userdel},
     {"users", "list users", MAN_USERS, b_users},
     {"usb", "USB devices", MAN_USB, b_usb},
+    {"run", "run script file", MAN_RUN, b_run},
+    {"pkg", "package manager", MAN_PKG, b_pkg},
     {0, 0, 0, 0},
 };
 
@@ -1052,12 +1085,12 @@ static int b_gui(int argc, char **argv, const char *in) {    (void)argc; (void)a
 /* installer image: MBR + stage2 as loaded by the bootloader, still
  * intact in RAM (nothing reuses 0x7C00+ after boot) */
 #define INSTALL_SRC ((const u8 *)0x7C00u)
-#define INSTALL_SECTORS 161   /* 1 MBR + STAGE2_SECTORS (see Makefile) */
+#define INSTALL_SECTORS 193   /* 1 MBR + STAGE2_SECTORS (see Makefile) */
 /* snapshot area: free RAM above the kernel, below the stack.
  * (Was 0x30000; the kernel's .bss grew past it and the snapshot
  * trashed cap_active/devs/etc. Guarded below against recurrence.) */
 #define INSTALL_SNAP ((u8 *)0x40000u)
-#define INSTALL_SNAP_END ((u8 *)0x54200u)   /* +161 sectors, worst case */
+#define INSTALL_SNAP_END ((u8 *)0x58200u)   /* +193 sectors, worst case */
 
 static int b_install(int argc, char **argv, const char *in) {
     (void)argc; (void)argv; (void)in;
@@ -1078,7 +1111,7 @@ static int b_install(int argc, char **argv, const char *in) {
         return 1;
     }
     if (d.sectors < INSTALL_SECTORS) {
-        tui_msg("Error", "install: disk too small (need 161 sectors)");
+        tui_msg("Error", "install: disk too small (need 193 sectors)");
         vga_clear();
         return 1;
     }
@@ -1382,6 +1415,161 @@ static int b_users(int argc, char **argv, const char *in) {
         if (buf[i] == '\n') i++;
     }
     return 0;
+}
+
+static int b_run(int argc, char **argv, const char *in) {
+    (void)in;
+    char buf[768];
+    int n, o = 0;
+    if (argc != 2) { sh_eprint("Usage: run FILE\n"); return 1; }
+    n = shell_fread(argv[1], buf, sizeof(buf));
+    if (n < 0) { sh_eprint("run: cannot read file\n"); return 1; }
+    while (o < n) {
+        static char line[256];
+        int k = 0, ls = o;
+        while (o < n && buf[o] != '\n') o++;
+        /* strip leading blanks; skip empty + # comments */
+        while (ls < o && (buf[ls] == ' ' || buf[ls] == '\t')) ls++;
+        while (ls < o && k < 255) line[k++] = buf[ls++];
+        line[k] = 0;
+        if (o < n) o++;
+        if (!line[0] || line[0] == '#') continue;
+        run_line(line);
+        if (exit_flag || logout_flag) break;
+    }
+    return last_status;
+}
+
+/* archive scratch: shared with the installer snapshot area (never
+ * concurrent: install never calls pkg). Saves 8KB of .bss. */
+#define PKG_ARC ((u8 *)0x40000u)
+
+static int b_pkg(int argc, char **argv, const char *in) {
+    (void)in;
+    if (argc < 2) {
+        sh_eprint("Usage: pkg list | info NAME | install FILE |"
+                  " install-hd LBA | remove NAME\n");
+        return 1;
+    }
+    if (scmp(argv[1], "list") == 0) {
+        char buf[768];
+        if (shell_fread("/pkg/registry", buf, sizeof(buf)) < 0 ||
+            !buf[0]) {
+            sh_print("no packages installed\n");
+            return 0;
+        }
+        sh_print(buf);
+        return 0;
+    }
+    if (scmp(argv[1], "info") == 0) {
+        char man[96], list[768];
+        int n, o = 0, i = 0;
+        if (argc != 3) { sh_eprint("Usage: pkg info NAME\n"); return 1; }
+        while (argv[2][i] && i < 70) { man[i] = argv[2][i]; i++; }
+        man[i] = 0;
+        {
+            /* /pkg/<name>/MANIFEST */
+            char full[96];
+            int k = 0;
+            const char *p = "/pkg/";
+            while (*p) full[k++] = *p++;
+            for (i = 0; man[i]; i++) full[k++] = man[i];
+            full[k++] = '/';
+            {
+                const char *m = "MANIFEST";
+                int j = 0;
+                while (m[j]) full[k++] = m[j++];
+            }
+            full[k] = 0;
+            for (i = 0; full[i]; i++) man[i] = full[i];
+            man[i] = 0;
+        }
+        n = shell_fread(man, list, sizeof(list));
+        if (n < 0) { sh_eprint("pkg: not installed\n"); return 1; }
+        sh_print(argv[2]);
+        sh_putc('\n');
+        while (o < n) {
+            int ls = o;
+            while (o < n && list[o] != '\n') o++;
+            sh_print("  ");
+            for (i = ls; i < o; i++) sh_putc(list[i]);
+            sh_putc('\n');
+            if (o < n) o++;
+        }
+        return 0;
+    }
+    if (scmp(argv[1], "remove") == 0) {
+        if (argc != 3) { sh_eprint("Usage: pkg remove NAME\n"); return 1; }
+        if (pkg_remove(argv[2])) {
+            sh_eprint("pkg: remove failed (unknown package?)\n");
+            return 1;
+        }
+        sh_print("Removed\n");
+        return 0;
+    }
+    if (scmp(argv[1], "install") == 0 || scmp(argv[1], "install-hd") == 0) {
+        char name[40], ver[40];
+        int n, nf, fromhd = scmp(argv[1], "install-hd") == 0;
+        u8 *arc = PKG_ARC;
+        if (argc != 3) {
+            sh_eprint("Usage: pkg install FILE | install-hd LBA\n");
+            return 1;
+        }
+        if (fromhd) {
+            u32 lba = 0, secs;
+            int len;
+            for (int i = 0; argv[2][i]; i++) {
+                if (argv[2][i] < '0' || argv[2][i] > '9') {
+                    sh_eprint("pkg: LBA must be a number\n");
+                    return 1;
+                }
+                lba = lba * 10 + (u32)(argv[2][i] - '0');
+            }
+            secs = (PKG_MAX_BYTES + 511) / 512;
+            if (ata_read(0, lba, arc, secs)) {
+                sh_eprint("pkg: disk read failed\n");
+                return 1;
+            }
+            len = pkg_len(arc, PKG_MAX_BYTES);
+            if (len < 0 || pkg_check(arc, (u32)len)) {
+                sh_eprint("pkg: bad archive (magic/size/checksum)\n");
+                return 1;
+            }
+            n = len;
+        } else {
+            char tmp[768];
+            n = shell_fread(argv[2], tmp, sizeof(tmp));
+            if (n < 0) { sh_eprint("pkg: cannot read file\n"); return 1; }
+            for (int i = 0; i < n; i++) arc[i] = (u8)tmp[i];
+            if (pkg_check(arc, (u32)n)) {
+                sh_eprint("pkg: bad archive (magic/size/checksum)\n");
+                return 1;
+            }
+        }
+        if (pkg_name(arc, (u32)n, name, sizeof(name)) ||
+            pkg_version(arc, (u32)n, ver, sizeof(ver))) {
+            sh_eprint("pkg: bad archive\n");
+            return 1;
+        }
+        nf = pkg_nfiles(arc, (u32)n);
+        if (pkg_install_arc(arc, (u32)n)) {
+            sh_eprint("pkg: install failed (space? bad paths?)\n");
+            return 1;
+        }
+        sh_print("Installed ");
+        sh_print(name);
+        sh_print(" ");
+        sh_print(ver);
+        sh_print(" (");
+        {
+            char nb[12];
+            sh_print(sitoa(nf, nb));
+        }
+        sh_print(" files)\n");
+        return 0;
+    }
+    sh_eprint("pkg: unknown subcommand\n");
+    return 1;
 }
 
 static int b_usb(int argc, char **argv, const char *in) {

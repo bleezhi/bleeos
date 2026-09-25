@@ -12,5 +12,7 @@ int shell_uid(void);             /* current login uid */
 const char *shell_user(void);    /* current login name */
 int shell_fread(const char *path, char *buf, u32 cap);  /* bytes, -1 */
 int shell_fwrite(const char *path, const char *data, u32 len);  /* 0 ok */
+int shell_mkdir(const char *path);   /* 0 ok (exists ok) */
+int shell_rm(const char *path);      /* file/empty dir; 0 ok */
 
 #endif
