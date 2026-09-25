@@ -38,6 +38,20 @@ static inline void sti(void) { __asm__ volatile ("sti"); }
 static inline void hlt(void) { __asm__ volatile ("hlt"); }
 
 /* ---------- VGA (80x25, buffer at 0xB8000) ---------- */
+/* Redirectable text backend: when set, all vga_* calls below forward
+ * to it (GUI terminal). NULL means the real VGA hardware. */
+struct vga_backend {
+    void (*clear)(void);
+    void (*putc)(char c);
+    void (*print)(const char *s);
+    void (*setcolor)(u8 color);
+    u8 (*getcolor)(void);
+    u8 (*row)(void);
+    u8 (*col)(void);
+    void (*setcursor)(u8 row, u8 col);
+    void (*clear_eol)(void);
+    void (*write_at)(u8 row, u8 col, const char *s, u8 attr);
+};
 #define VGA_WIDTH  80
 #define VGA_HEIGHT 25
 
@@ -52,6 +66,8 @@ void vga_setcursor(u8 row, u8 col);
 void vga_clear_eol(void);
 /* direct cell write (menu UI, flicker-free updates) */
 void vga_write_at(u8 row, u8 col, const char *s, u8 attr);
+void vga_set_backend(const struct vga_backend *b);  /* NULL = real VGA */
+const struct vga_backend *vga_backend(void);
 
 /* ---------- keyboard: key events ---------- */
 /* 0..255 = ASCII/CTRL char, -1 = no data (non-blocking only), else: */

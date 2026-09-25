@@ -121,7 +121,9 @@ Left click focuses/drags windows, right click opens the menu
 X button closes. `Esc` in the desktop logs out to the login
 screen; `Esc` at login returns to the shell.
 Demo apps: **Counter** (click +1), **SysInfo** (live CMOS clock),
-**Calculator** (integer), **Doom clone** (fixed-point raycaster:
+**Calculator** (integer), **Terminal** (the shell in a window —
+shares the session; `exit` closes it, no nested `gui`/`install`),
+**Doom clone** (fixed-point raycaster:
 textured walls, chasing imps, hitscan gun, ammo/health HUD —
 arrows/WASD + Space, find the exit), **Display** settings (640x480, 800x600,
 1024x768 presets plus a Custom editor — type any `W`x`H` within

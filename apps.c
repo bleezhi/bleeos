@@ -92,6 +92,16 @@ void apps_open_demo(void) {
     wm_open("SysInfo", 320, 80, 260, 170, sysinfo_draw, 0, 0);
 }
 
+void apps_window_closed(int id) {
+    apps_doom_closed(id);
+    apps_term_closed(id);
+}
+
+void apps_session_reset(void) {
+    apps_doom_reset();
+    apps_term_reset();
+}
+
 /* ---------- Calculator (integer) ---------- */
 static long calc_acc, calc_cur;
 static int calc_op, calc_fresh, calc_err;

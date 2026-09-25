@@ -35,9 +35,9 @@ static char wm_user[32] = "guest";
 
 /* right-click desktop menu */
 static int menu_open, menu_x, menu_y, menu_hover;
-#define MENU_N 6
+#define MENU_N 7
 static const char *menu_items[MENU_N] = {
-    "Display settings", "Calculator", "Doom clone",
+    "Display settings", "Calculator", "Doom clone", "Terminal",
     "Reboot", "Power off", "Log out",
 };
 #define MENU_W 200
@@ -251,14 +251,16 @@ static void menu_action(int idx) {
     extern void apps_open_display(void);
     extern void apps_open_calc(void);
     extern void apps_open_doom(void);
+    extern void apps_open_term(void);
     menu_open = 0;
     dirty = 1;
     if (idx == 0) apps_open_display();
     else if (idx == 1) apps_open_calc();
     else if (idx == 2) apps_open_doom();
-    else if (idx == 3) reboot();
-    else if (idx == 4) halt_cpu();
-    else if (idx == 5) quit = 1;    /* log out -> login screen */
+    else if (idx == 3) apps_open_term();
+    else if (idx == 4) reboot();
+    else if (idx == 5) halt_cpu();
+    else if (idx == 6) quit = 1;    /* log out -> login screen */
 }
 
 static int menu_hit(int x, int y) {
@@ -319,6 +321,9 @@ void wm_run(void) {
     extern void apps_session_reset(void);
     extern int apps_game_key(int k);
     extern int apps_game_active(void);
+    extern int apps_term_key(int k);
+    extern int apps_term_active(void);
+    extern int apps_term_busy(void);
     int last_btn = 0;
     u32 last_sec = rtc_seconds();
     for (int i = 0; i < MAXWIN; i++) wins[i].used = 0;  /* fresh session */
@@ -363,11 +368,15 @@ void wm_run(void) {
             last_btn = btn;
             dirty = 1;
         }
-        int k = kbd_trykey();
+        /* a busy terminal owns the keyboard (interactive command);
+         * anything we read here would be stolen from it */
+        int k = apps_term_busy() ? -1 : kbd_trykey();
         if (k != -1 && apps_custom_key(k)) {
             /* custom-res editor ate it (Esc there cancels, not logs out) */
         } else if (k != -1 && apps_game_active() && apps_game_key(k)) {
             /* game window ate it (Esc there closes the game) */
+        } else if (k != -1 && apps_term_active() && apps_term_key(k)) {
+            /* terminal ate it (Esc falls through: logs out) */
         } else if (k == 27) {
             if (menu_open) { menu_open = 0; dirty = 1; }
             else break;             /* Esc: log out to login screen */

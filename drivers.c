@@ -5,6 +5,10 @@
 #define VGA_BUF ((volatile u16*)0xB8000)
 
 static u8 cur_row, cur_col, cur_color = 0x07;
+static const struct vga_backend *vga_be;
+
+void vga_set_backend(const struct vga_backend *b) { vga_be = b; }
+const struct vga_backend *vga_backend(void) { return vga_be; }
 
 static void cursor_update(void) {
     u16 pos = (u16)(cur_row * VGA_WIDTH + cur_col);
@@ -13,6 +17,7 @@ static void cursor_update(void) {
 }
 
 void vga_clear(void) {
+    if (vga_be) { vga_be->clear(); return; }
     for (u32 i = 0; i < VGA_WIDTH * VGA_HEIGHT; i++)
         VGA_BUF[i] = (u16)(' ' | (cur_color << 8));
     cur_row = 0; cur_col = 0;
@@ -28,6 +33,7 @@ static void scroll(void) {
 }
 
 void vga_putc(char c) {
+    if (vga_be) { vga_be->putc(c); return; }
     if (c == '\n') {
         cur_col = 0;
         if (++cur_row >= VGA_HEIGHT) { scroll(); cur_row = VGA_HEIGHT - 1; }
@@ -46,13 +52,20 @@ void vga_putc(char c) {
     cursor_update();
 }
 
-void vga_print(const char *s) { while (*s) vga_putc(*s++); }
-void vga_setcolor(u8 color) { cur_color = color; }
-u8   vga_getcolor(void) { return cur_color; }
-u8   vga_row(void) { return cur_row; }
-u8   vga_col(void) { return cur_col; }
+void vga_print(const char *s) {
+    if (vga_be) { vga_be->print(s); return; }
+    while (*s) vga_putc(*s++);
+}
+void vga_setcolor(u8 color) {
+    if (vga_be) { vga_be->setcolor(color); return; }
+    cur_color = color;
+}
+u8   vga_getcolor(void) { return vga_be ? vga_be->getcolor() : cur_color; }
+u8   vga_row(void) { return vga_be ? vga_be->row() : cur_row; }
+u8   vga_col(void) { return vga_be ? vga_be->col() : cur_col; }
 
 void vga_setcursor(u8 row, u8 col) {
+    if (vga_be) { vga_be->setcursor(row, col); return; }
     if (row >= VGA_HEIGHT) row = VGA_HEIGHT - 1;
     if (col >= VGA_WIDTH) col = VGA_WIDTH - 1;
     cur_row = row; cur_col = col;
@@ -60,12 +73,14 @@ void vga_setcursor(u8 row, u8 col) {
 }
 
 void vga_clear_eol(void) {
+    if (vga_be) { vga_be->clear_eol(); return; }
     u8 saved = cur_color;
     for (u8 c = cur_col; c < VGA_WIDTH; c++)
         VGA_BUF[cur_row * VGA_WIDTH + c] = (u16)(' ' | (saved << 8));
 }
 
 void vga_write_at(u8 row, u8 col, const char *s, u8 attr) {
+    if (vga_be) { vga_be->write_at(row, col, s, attr); return; }
     u8 r = cur_row, c = cur_col;
     while (*s && col < VGA_WIDTH) {
         if (*s == '\n') break;

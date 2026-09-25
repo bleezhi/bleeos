@@ -453,6 +453,12 @@ static char cur_user[17];
 
 int shell_uid(void) { return cur_uid; }
 const char *shell_user(void) { return cur_user; }
+const char *shell_cwd(void) { return cwd; }
+static int term_mode;
+void sh_set_term(int on) { term_mode = on ? 1 : 0; }
+int sh_in_term(void) { return term_mode; }
+static int run_line(char *line);
+int shell_exec(char *line) { return run_line(line); }
 static void set_session(const char *name, int uid);
 
 static int b_help(int argc, char **argv, const char *in);
@@ -826,6 +832,11 @@ static int b_test(int argc, char **argv, const char *in) {
 }
 static int b_exit(int argc, char **argv, const char *in) {
     (void)in;
+    if (sh_in_term()) {
+        extern void apps_term_close(void);
+        apps_term_close();   /* exit closes the terminal, not the GUI */
+        return 0;
+    }
     exit_flag = 1;
     exit_code = argc > 1 ? sazi(argv[1]) : last_status;
     return exit_code;
@@ -905,9 +916,11 @@ static const char MAN_GUI[] =
     "Login screen (checks /etc/shadow), then 640x480 VBE desktop.\n"
     "Left click: focus/drag, right click: menu, X: close.\n"
     "Menu: display settings (resolution), calculator, doom clone,\n"
-    "reboot, power off, log out. Display has presets plus Custom:\n"
-    "click it, type WxH (320-1920 x 200-1200, W a multiple\n"
-    "of 8), Enter applies, Esc cancels. Doom: raycaster with\n"
+    "terminal, reboot, power off, log out. Terminal runs the\n"
+    "shell in a window (exit closes it; no nested gui/install).\n"
+    "Display has presets plus Custom: click it, type WxH\n"
+    "(320-1920 x 200-1200, W a multiple of 8), Enter applies,\n"
+    "Esc cancels. Doom: raycaster with\n"
     "textured walls, enemies, gun, HUD. Arrows/WASD move,\n"
     "Q/E strafe, Space fires, R restarts, Esc closes the game.\n"
     "Esc in desktop logs out, Esc at login returns to shell.\n";
@@ -1082,6 +1095,10 @@ static int b_vgaregs(int argc, char **argv, const char *in) {
 }
 
 static int b_gui(int argc, char **argv, const char *in) {    (void)argc; (void)argv; (void)in;
+    if (sh_in_term()) {
+        sh_eprint("gui: already running (this IS the GUI)\n");
+        return 1;
+    }
     vga_print("Starting GUI...\n");
     int r = wm_init();
     if (r) {
@@ -1112,6 +1129,10 @@ static int b_gui(int argc, char **argv, const char *in) {    (void)argc; (void)a
 static int b_install(int argc, char **argv, const char *in) {
     (void)argc; (void)argv; (void)in;
     ata_dev_t d;
+    if (sh_in_term()) {
+        sh_eprint("install: use the text console (needs full 80 cols)\n");
+        return 1;
+    }
     if (shell_uid() != 0) {
         tui_msg("Error", "install: root only (login as root)");
         vga_clear();
@@ -1325,6 +1346,10 @@ static int read_new_pass(char *buf, u32 cap) {
 
 static int b_logout(int argc, char **argv, const char *in) {
     (void)argc; (void)argv; (void)in;
+    if (sh_in_term()) {
+        sh_print("logout from the desktop (Esc at an empty shell)\n");
+        return 0;
+    }
     logout_flag = 1;
     return 0;
 }
