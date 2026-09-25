@@ -11,6 +11,8 @@
 #include "uhci.h"
 #include "tui.h"
 #include "pkg.h"
+#include "e1000.h"
+#include "net.h"
 
 /* ================= string helpers ================= */
 static void scpy(char *d, const char *s) { while ((*d++ = *s++)) ; }
@@ -851,6 +853,8 @@ static int b_users(int argc, char **argv, const char *in);
 static int b_usb(int argc, char **argv, const char *in);
 static int b_run(int argc, char **argv, const char *in);
 static int b_pkg(int argc, char **argv, const char *in);
+static int b_net(int argc, char **argv, const char *in);
+static int b_ping(int argc, char **argv, const char *in);
 static int run_line(char *line);
 static int read_new_pass(char *buf, u32 cap);
 static int b_vgaregs(int argc, char **argv, const char *in);
@@ -914,7 +918,7 @@ static const char MAN_INSTALL[] =
     "install - Debian-like OS installer (TUI)\nUsage: install\n"
     "Stepped wizard (root only): welcome, hostname, root\n"
     "password, optional user, disk confirm, progress bar.\n"
-    "Writes boot sector + kernel (193 sectors) to LBA 0 of\n"
+    "Writes boot sector + kernel (225 sectors) to LBA 0 of\n"
     "the ATA primary master and verifies. Hostname, users\n"
     "and passwords persist on installed systems.\n";
 static const char MAN_USERS[] =
@@ -932,6 +936,15 @@ static const char MAN_USB[] =
     "Shows the UHCI controller I/O base and per-port attach\n"
     "state. No transfers, no enumeration: PS/2 stays the input\n"
     "path. Needs -device piix3-usb-uhci to show anything.\n";
+static const char MAN_NET[] =
+    "net - network status\nUsage: net\n"
+    "Shows E1000 MAC, static IP (10.0.2.15/24, SLIRP LAN),\n"
+    "link state and TX/RX counters. Needs -device e1000\n"
+    "with user-mode networking.\n";
+static const char MAN_PING[] =
+    "ping - ICMP echo\nUsage: ping IP [COUNT]\n"
+    "Sends echo requests (default 4, max 8), ARPs as needed.\n"
+    "Only the local /24 is reachable (try the gateway).\n";
 static const char MAN_RUN[] =
     "run - execute a script file\nUsage: run FILE\n"
     "Runs each line as a shell command (skips blanks and\n"
@@ -956,7 +969,7 @@ static int b_help(int argc, char **argv, const char *in) {
              "  pwd ls cd mkdir touch rm cat env export unset sleep uptime date\n"
              "  history true false test exit reboot halt poweroff gui vgaregs\n"
              "  install logout su passwd useradd userdel users usb\n"
-             "  run pkg\n"
+             "  run pkg net ping\n"
              "Syntax: ; && ||  $VAR $?  > >> <  quotes  (see `man shell`)\n");
     return 0;
 }
@@ -1005,6 +1018,8 @@ static const cmd_t cmds[] = {
     {"usb", "USB devices", MAN_USB, b_usb},
     {"run", "run script file", MAN_RUN, b_run},
     {"pkg", "package manager", MAN_PKG, b_pkg},
+    {"net", "network status", MAN_NET, b_net},
+    {"ping", "ICMP echo", MAN_PING, b_ping},
     {0, 0, 0, 0},
 };
 
@@ -1087,12 +1102,12 @@ static int b_gui(int argc, char **argv, const char *in) {    (void)argc; (void)a
 /* installer image: MBR + stage2 as loaded by the bootloader, still
  * intact in RAM (nothing reuses 0x7C00+ after boot) */
 #define INSTALL_SRC ((const u8 *)0x7C00u)
-#define INSTALL_SECTORS 193   /* 1 MBR + STAGE2_SECTORS (see Makefile) */
+#define INSTALL_SECTORS 225   /* 1 MBR + STAGE2_SECTORS (see Makefile) */
 /* snapshot area: free RAM above the kernel, below the stack.
  * (Was 0x30000; the kernel's .bss grew past it and the snapshot
  * trashed cap_active/devs/etc. Guarded below against recurrence.) */
 #define INSTALL_SNAP ((u8 *)0x40000u)
-#define INSTALL_SNAP_END ((u8 *)0x58200u)   /* +193 sectors, worst case */
+#define INSTALL_SNAP_END ((u8 *)0x5C200u)   /* +225 sectors, worst case */
 
 static int b_install(int argc, char **argv, const char *in) {
     (void)argc; (void)argv; (void)in;
@@ -1113,7 +1128,7 @@ static int b_install(int argc, char **argv, const char *in) {
         return 1;
     }
     if (d.sectors < INSTALL_SECTORS) {
-        tui_msg("Error", "install: disk too small (need 193 sectors)");
+        tui_msg("Error", "install: disk too small (need 225 sectors)");
         vga_clear();
         return 1;
     }
@@ -1595,6 +1610,97 @@ static int b_usb(int argc, char **argv, const char *in) {
     if (argc > 1 && scmp(argv[1], "probe") == 0)
         sh_print("usb probe: unimplemented (stub detector only)\n");
     return 0;
+}
+
+static void print_ip(u32 ip) {
+    char b[4];
+    sh_print(utoa10((ip >> 24) & 255, b));
+    sh_putc('.');
+    sh_print(utoa10((ip >> 16) & 255, b));
+    sh_putc('.');
+    sh_print(utoa10((ip >> 8) & 255, b));
+    sh_putc('.');
+    sh_print(utoa10(ip & 255, b));
+}
+
+static int parse_ip(const char *s, u32 *out) {
+    u32 parts[4];
+    int i = 0;
+    for (int f = 0; f < 4; f++) {
+        u32 v = 0;
+        int digits = 0;
+        if (f > 0) {
+            if (s[i] != '.') return -1;
+            i++;
+        }
+        while (s[i] >= '0' && s[i] <= '9') {
+            v = v * 10 + (u32)(s[i] - '0');
+            if (v > 255) return -1;
+            digits++;
+            i++;
+        }
+        if (!digits) return -1;
+        parts[f] = v;
+    }
+    if (s[i]) return -1;
+    *out = (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3];
+    return 0;
+}
+
+static int b_net(int argc, char **argv, const char *in) {
+    (void)argc; (void)argv; (void)in;
+    u8 mac[6];
+    char nb[12];
+    if (!e1000_present() && e1000_init()) {
+        sh_print("net: no E1000 NIC found (try -device e1000)\n");
+        return 1;
+    }
+    e1000_mac(mac);
+    sh_print("mac ");
+    for (int i = 0; i < 6; i++) {
+        const char *h = sutoa(mac[i], nb, 16, 0);
+        if (mac[i] < 16) sh_putc('0');
+        sh_print(h);
+        if (i < 5) sh_putc(':');
+    }
+    sh_print("\nip ");
+    print_ip(net_ip());
+    sh_print("/24 gw ");
+    print_ip(net_gw());
+    sh_putc('\n');
+    sh_print(e1000_link() ? "link up\n" : "link DOWN\n");
+    sh_print("tx ");
+    sh_print(sutoa(e1000_txcount(), nb, 10, 0));
+    sh_print(" rx ");
+    sh_print(sutoa(e1000_rxcount(), nb, 10, 0));
+    sh_putc('\n');
+    return 0;
+}
+
+static int b_ping(int argc, char **argv, const char *in) {
+    (void)in;
+    u32 dst;
+    int count = 4, got;
+    if (argc < 2 || argc > 3) {
+        sh_eprint("Usage: ping IP [COUNT]\n");
+        return 1;
+    }
+    if (parse_ip(argv[1], &dst)) {
+        sh_eprint("ping: bad IP (dotted decimal)\n");
+        return 1;
+    }
+    if (argc == 3) {
+        count = 0;
+        for (int i = 0; argv[2][i]; i++) {
+            if (argv[2][i] < '0' || argv[2][i] > '9') {
+                sh_eprint("ping: bad count\n");
+                return 1;
+            }
+            count = count * 10 + (argv[2][i] - '0');
+        }
+    }
+    got = net_ping(dst, count);
+    return got > 0 ? 0 : 1;
 }
 
 static int dispatch(int argc, char **argv, const char *in) {

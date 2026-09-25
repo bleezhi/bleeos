@@ -11,13 +11,13 @@ QEMU=qemu-system-i386
 DISPLAY_BACKEND ?= $(if $(or $(DISPLAY),$(WAYLAND_DISPLAY)),sdl,none)
 
 # MBR loads this many sectors (must cover the whole stage2 binary)
-STAGE2_SECTORS=192
+STAGE2_SECTORS=224
 
 CFLAGS=-m32 -march=i386 -mno-mmx -mno-sse -mno-sse2 -ffreestanding -nostdlib -nostartfiles -nodefaultlibs \
        -fno-builtin -fno-stack-protector -fno-pie -no-pie \
        -Wall -Wextra -O2 -std=gnu11
 
-OBJS=kernel_entry.o drivers.o bootmenu.o shell.o kernel.o vbe.o gfx.o mouse.o wm.o apps.o login.o ata.o users.o uhci.o usb.o tui.o pkg.o doom.o
+OBJS=kernel_entry.o drivers.o bootmenu.o shell.o kernel.o vbe.o gfx.o mouse.o wm.o apps.o login.o ata.o users.o uhci.o usb.o tui.o pkg.o doom.o e1000.o net.o
 
 all: os.img
 
@@ -73,6 +73,12 @@ pkg.o: pkg.c pkg.h shell.h drivers.h
 
 doom.o: doom.c wm.h gfx.h drivers.h
 	$(CC) $(CFLAGS) -c doom.c -o doom.o
+
+e1000.o: e1000.c e1000.h drivers.h
+	$(CC) $(CFLAGS) -c e1000.c -o e1000.o
+
+net.o: net.c net.h e1000.h drivers.h
+	$(CC) $(CFLAGS) -c net.c -o net.o
 
 # sample packages + website copies (keep sizes in docs/packages.json true)
 pkgs:
@@ -161,6 +167,15 @@ run-cd: bleeos.iso
 		-monitor unix:/tmp/opencode/qemu-mon,server,nowait \
 		-qmp unix:/tmp/opencode/qmp.sock,server,nowait \
 		-cdrom bleeos.iso -boot order=d,strict=on -net none
+
+# Network rig: E1000 on user-mode networking (SLIRP LAN
+# 10.0.2.0/24, guest .15, gateway .2). `net`, `ping 10.0.2.2`.
+run-net: os.img
+	$(QEMU) -machine accel=kvm:tcg -vga std -display none \
+		-monitor unix:/tmp/opencode/qemu-mon,server,nowait \
+		-qmp unix:/tmp/opencode/qmp.sock,server,nowait \
+		-netdev user,id=n0 -device e1000,netdev=n0 \
+		-drive file=os.img,format=raw,if=floppy -boot order=a,strict=on -net none
 
 # Debug/test VM: HMP monitor + QMP sockets for sendkey, mouse events,
 # screendump/pmemsave. PS/2 kbd+mouse are the default pc devices.

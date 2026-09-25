@@ -41,7 +41,7 @@ ATA PIO driver (primary bus, LBA28, polled). The kernel reports a
 detected primary master at boot; `install` is a Debian-like TUI
 wizard (root only): welcome, hostname, root password, optional
 user, disk confirm, progress bar, reboot. It writes boot sector +
-kernel (193 sectors) to LBA 0, verifies, then flushes hostname +
+kernel (225 sectors) to LBA 0, verifies, then flushes hostname +
 users to the user DB so the installed system boots with them.
 Dialogs are modal boxes (blue screen, gray box, shadow, red
 title, red buttons); errors use the same style (no-disk offers
@@ -75,6 +75,12 @@ attach state at boot and via `usb`. No resets, no transfers — the
 BIOS-owned controller is left alone and PS/2 stays the input path.
 Full UHCI enumeration was attempted and dropped (TDs never complete
 on QEMU's UHCI); the stub keeps the door open without the risk.
+
+## Network (`net`, `ping`)
+E1000 driver (82540EM, MMIO, polled rings, DMA above 1MB) with
+static SLIRP-LAN config (10.0.2.15/24, gateway 10.0.2.2), an ARP
+cache, and ICMP echo. `run-net` attaches `-device e1000` on
+user-mode networking; `ping 10.0.2.2` answers. No DHCP/DNS/TCP yet.
 
 ## Serial log + kernel panic
 COM1 (38400 8N1, polled) mirrors the boot banner via `klog()` (VGA
