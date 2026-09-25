@@ -17,7 +17,7 @@ CFLAGS=-m32 -march=i386 -mno-mmx -mno-sse -mno-sse2 -ffreestanding -nostdlib -no
        -fno-builtin -fno-stack-protector -fno-pie -no-pie \
        -Wall -Wextra -O2 -std=gnu11
 
-OBJS=kernel_entry.o drivers.o bootmenu.o shell.o kernel.o vbe.o gfx.o mouse.o wm.o apps.o login.o ata.o users.o uhci.o usb.o tui.o pkg.o
+OBJS=kernel_entry.o drivers.o bootmenu.o shell.o kernel.o vbe.o gfx.o mouse.o wm.o apps.o login.o ata.o users.o uhci.o usb.o tui.o pkg.o doom.o
 
 all: os.img
 
@@ -70,6 +70,9 @@ tui.o: tui.c tui.h drivers.h
 
 pkg.o: pkg.c pkg.h shell.h drivers.h
 	$(CC) $(CFLAGS) -c pkg.c -o pkg.o
+
+doom.o: doom.c wm.h gfx.h drivers.h
+	$(CC) $(CFLAGS) -c doom.c -o doom.o
 
 # sample packages + website copies (keep sizes in docs/packages.json true)
 pkgs:

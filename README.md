@@ -115,7 +115,9 @@ Left click focuses/drags windows, right click opens the menu
 X button closes. `Esc` in the desktop logs out to the login
 screen; `Esc` at login returns to the shell.
 Demo apps: **Counter** (click +1), **SysInfo** (live CMOS clock),
-**Calculator** (integer), **Display** settings (640x480, 800x600,
+**Calculator** (integer), **Doom clone** (fixed-point raycaster:
+textured walls, chasing imps, hitscan gun, ammo/health HUD —
+arrows/WASD + Space, find the exit), **Display** settings (640x480, 800x600,
 1024x768 presets plus a Custom editor — type any `W`x`H` within
 320-1920 x 200-1200, `W` a multiple of 8 — applied live). The
 `Show all screen types` checkbox swaps the presets for all 24

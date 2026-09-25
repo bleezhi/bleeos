@@ -35,9 +35,10 @@ static char wm_user[32] = "guest";
 
 /* right-click desktop menu */
 static int menu_open, menu_x, menu_y, menu_hover;
-#define MENU_N 5
+#define MENU_N 6
 static const char *menu_items[MENU_N] = {
-    "Display settings", "Calculator", "Reboot", "Power off", "Log out",
+    "Display settings", "Calculator", "Doom clone",
+    "Reboot", "Power off", "Log out",
 };
 #define MENU_W 200
 #define MENU_H (MENU_N * 22 + 8)
@@ -45,6 +46,17 @@ static const char *menu_items[MENU_N] = {
 void wm_dirty(void) { dirty = 1; }
 void wm_mouse_xy(int *x, int *y) { *x = mx; *y = my; }
 int wm_nwin(void) { return norder; }
+
+static int fps_req;   /* 0 = normal pacing, else min ms per frame */
+
+static void wm_close(int idx);
+void wm_require_fps(int ms) { fps_req = ms < 0 ? 0 : ms; }
+
+void wm_close_win(win_t *w) {
+    if (!w) return;
+    for (int i = 0; i < MAXWIN; i++)
+        if (&wins[i] == w && wins[i].used) { wm_close(i); return; }
+}
 void wm_set_user(const char *name) {
     int i = 0;
     while (name[i] && i < 31) { wm_user[i] = name[i]; i++; }
@@ -102,7 +114,9 @@ win_t *wm_open(const char *title, int x, int y, int w, int h,
 }
 
 static void wm_close(int idx) {
+    extern void apps_window_closed(int id);
     wins[idx].used = 0;
+    apps_window_closed(idx);
     for (int i = 0; i < norder; i++) {
         if (order[i] == idx) {
             for (int j = i; j + 1 < norder; j++) order[j] = order[j + 1];
@@ -236,13 +250,15 @@ static void draw_all(void) {
 static void menu_action(int idx) {
     extern void apps_open_display(void);
     extern void apps_open_calc(void);
+    extern void apps_open_doom(void);
     menu_open = 0;
     dirty = 1;
     if (idx == 0) apps_open_display();
     else if (idx == 1) apps_open_calc();
-    else if (idx == 2) reboot();
-    else if (idx == 3) halt_cpu();
-    else if (idx == 4) quit = 1;    /* log out -> login screen */
+    else if (idx == 2) apps_open_doom();
+    else if (idx == 3) reboot();
+    else if (idx == 4) halt_cpu();
+    else if (idx == 5) quit = 1;    /* log out -> login screen */
 }
 
 static int menu_hit(int x, int y) {
@@ -300,10 +316,15 @@ int wm_init(void) {
 
 void wm_run(void) {
     extern void apps_open_demo(void);
+    extern void apps_session_reset(void);
+    extern int apps_game_key(int k);
+    extern int apps_game_active(void);
     int last_btn = 0;
     u32 last_sec = rtc_seconds();
     for (int i = 0; i < MAXWIN; i++) wins[i].used = 0;  /* fresh session */
     norder = 0; dragging = 0; quit = 0; menu_open = 0; dirty = 1;
+    fps_req = 0;
+    apps_session_reset();
     mx = gfx_w() / 2; my = gfx_h() / 2; mbtn = 0;
     mouse_resync();
     apps_open_demo();
@@ -345,18 +366,23 @@ void wm_run(void) {
         int k = kbd_trykey();
         if (k != -1 && apps_custom_key(k)) {
             /* custom-res editor ate it (Esc there cancels, not logs out) */
+        } else if (k != -1 && apps_game_active() && apps_game_key(k)) {
+            /* game window ate it (Esc there closes the game) */
         } else if (k == 27) {
             if (menu_open) { menu_open = 0; dirty = 1; }
             else break;             /* Esc: log out to login screen */
         }
         if (quit) break;
-        /* clocks show seconds: refresh on change, not on a fixed tick */
+        /* clocks show seconds: refresh on change, not on a fixed tick;
+         * an animated window (game) forces every-frame redraws */
         u32 now = rtc_seconds();
-        if (dirty || now != last_sec) { draw_all(); dirty = 0; last_sec = now; }
+        if (dirty || now != last_sec || fps_req) {
+            draw_all(); dirty = 0; last_sec = now;
+        }
         /* packets that arrived mid-render: catch up now instead of
          * sleeping, or fast moves overrun the 1-byte 8042 buffer */
         if (mouse_pending()) continue;
-        sleep_ms(5);
+        sleep_ms(fps_req > 0 ? 1000 / fps_req : 5);
     }
     /* no vbe_disable here: b_gui owns the graphics session (login loop) */
 }
