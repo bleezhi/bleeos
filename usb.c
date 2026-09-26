@@ -103,42 +103,12 @@ static char keychar(u8 k,int shift,int caps) {
         static const char *lo="abcdefghijklmnopqrstuvwxyz";
         static const char *hi="ABCDEFGHIJKLMNOPQRSTUVWXYZ";
         c=(shift?hi:lo)[k-4];
-        if(caps&&!shift)c=(char)(c^32);
-        else if(caps&&shift)c=(char)(c^32);
+        if(caps)c=(char)(c^32);
         return c;
     }
     switch(k) {
     case 0x1e:return shift?'!':'1'; case 0x1f:return shift?'@':'2';
-    case 0x20:return shift?'#':'3'; case 0x21:return shift?'(void) {
-    u8 r[8];
-    for(int d=0;d<ndev;d++){hid_dev_t*h=&devs[d];
-        if(!h->used||!h->kbd_ep)continue;
-        if(uhci_intr_in(h->addr,h->kbd_ep,h->kbd_mps,h->low,r,8,&h->kbd_toggle))continue;
-        h->kbd_mod=r[0];
-        for(int i=0;i<6;i++){u8 k=r[2+i];if(!k||held(h->kbd_prev,k))continue;
-            h->kbd_prev[i]=k;
-            if(k==0x39){h->caps^=1;return 0;}
-            if(k==0x4f)return KEY_RIGHT;if(k==0x50)return KEY_LEFT;
-            if(k==0x51)return KEY_DOWN;if(k==0x52)return KEY_UP;
-            if(k==0x4a)return KEY_HOME;if(k==0x4d)return KEY_END;if(k==0x4c)return KEY_DEL;
-            if(k==0x1d&&(h->kbd_mod&0x22))return 3;
-            if(k==0x07&&(h->kbd_mod&0x22))return 4;
-            {char c=keychar(k,(h->kbd_mod&0x22)!=0,h->caps);if(c)return (int)(u8)c;}
-        }
-        for(int i=0;i<6;i++)if(!r[2+i])h->kbd_prev[i]=0;
-    }
-    return -1;
-}
-int usb_hid_mouse_poll(int *dx,int *dy,int *btn) {
-    u8 r[4];
-    for(int d=0;d<ndev;d++){hid_dev_t*h=&devs[d];
-        if(!h->used||!h->mouse_ep)continue;
-        if(uhci_intr_in(h->addr,h->mouse_ep,h->mouse_mps,h->low,r,4,&h->mouse_toggle))continue;
-        *btn=r[0]&7;*dx=(int)(signed char)r[1];*dy=-(int)(signed char)r[2];return 1;
-    }
-    return 0;
-}
-:'4';
+    case 0x20:return shift?'#':'3'; case 0x21:return shift?'$':'4';
     case 0x22:return shift?'%':'5'; case 0x23:return shift?'^':'6';
     case 0x24:return shift?'&':'7'; case 0x25:return shift?'*':'8';
     case 0x26:return shift?'(':'9'; case 0x27:return shift?')':'0';
@@ -147,7 +117,8 @@ int usb_hid_mouse_poll(int *dx,int *dy,int *btn) {
     case 0x2d:return shift?'_':'-'; case 0x2e:return shift?'+':'=';
     case 0x2f:return shift?'{':'['; case 0x30:return shift?'}':']';
     case 0x31:return shift?'|':'\\'; case 0x33:return shift?':':';';
-    case 0x34:return shift?'\"':'\\''; case 0x35:return shift?'~':'\x60';
+    case 0x34:return shift?'"':'\'';
+    case 0x35:return shift?'~':'\x60';
     case 0x36:return shift?'<':','; case 0x37:return shift?'>':'.';
     case 0x38:return shift?'?':'/';
     default:return c;
