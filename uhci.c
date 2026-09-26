@@ -88,14 +88,14 @@ static int wait_td(uhci_td_t *td, u32 timeout_ms) {
     }
 }
 
-static int submit_chain(uhci_td_t **tds, int n) {
+static int submit_chain(uhci_td_t **tds, int n, u32 timeout_ms) {
     if (!qh || !n) return -1;
     for (int i = 0; i + 1 < n; i++)
         tds[i]->link = (u32)tds[i + 1];
     tds[n - 1]->link = LINK_TERM;
     qh->element = (u32)tds[0];
     for (int i = 0; i < n; i++) {
-        if (wait_td(tds[i], 500)) {
+        if (wait_td(tds[i], timeout_ms)) {
             qh->element = QH_LINK_TERM;
             sleep_ms(1);
             return -1;
@@ -187,7 +187,7 @@ int uhci_control(u8 addr, u8 maxpkt, int low, const u8 setup[8],
     td = td_new(dir_in ? PID_OUT : PID_IN, addr, 0, 1, 0, 0, low);
     if (!td) return -1;
     tds[n++] = td;
-    if (submit_chain(tds, n)) {
+    if (submit_chain(tds, n, 500)) {
         for (int i = 0; i < n; i++) kfree_aligned(tds[i]);
         return -1;
     }
@@ -202,7 +202,7 @@ int uhci_intr_in(u8 addr, u8 ep, u8 maxpkt, int low,
     int t = toggle ? *toggle : 0;
     td = td_new(PID_IN, addr, ep, t, data, len, low);
     if (!td) return -1;
-    if (submit_chain(&td, 1)) {
+    if (submit_chain(&td, 1, 25)) {
         kfree_aligned(td);
         return -1;
     }
