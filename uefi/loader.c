@@ -168,33 +168,40 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *ST_) {
     }
     puts_ascii("kernel.bin ok\n");
 
-    /* --- GOP framebuffer: pick the largest 32-bit direct-color
-     * mode the desktop can handle (shadow buffer tops out at
-     * 1920x1200), then record it --- */
+    /* --- GOP framebuffer: prefer standard external-display modes.
+     * The firmware owns the physical connector (including HDMI), while
+     * BleeOS owns the framebuffer after ExitBootServices. Prefer 1920x1080
+     * because it is the common HDMI mode, then 1280x720, then fall back to
+     * the largest direct-color mode that fits the shadow buffer. --- */
     param->magic = 0;
     param->has_gop = 0;
     st = BS->LocateProtocol(&GopGuid, 0, (void **)&Gop);
     if (!st && Gop && Gop->Mode) {
         u32 best = Gop->Mode->Mode, bw = 0, bh = 0, bgr = 0;
-        int have = 0;
+        int have = 0, best_rank = 99;
         for (u32 m = 0; m < Gop->Mode->MaxMode; m++) {
             EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *mi = 0;
             UINTN misz = 0;
             u32 w, h;
-            int fmt;
+            int fmt, rank;
             if (Gop->QueryMode(Gop, m, &misz, &mi) || !mi)
                 continue;
             fmt = mi->PixelFormat;
             if (fmt != 0 && fmt != 1)
-                continue;   /* BitMask/BltOnly: no direct framebuffer */
+                continue;
             w = mi->HorizontalResolution;
             h = mi->VerticalResolution;
             if (w > 1920 || h > 1200 || !w || !h)
-                continue;   /* beyond the gfx shadow buffer */
-            if (!have || (u64)w * h > (u64)bw * bh ||
-                ((u64)w * h == (u64)bw * bh && fmt == 1 && !bgr)) {
+                continue;
+            rank = ((w == 1920 && h == 1080) ? 0 :
+                    (w == 1280 && h == 720) ? 1 : 2);
+            if (!have || rank < best_rank ||
+                (rank == best_rank &&
+                 ((u64)w * h > (u64)bw * bh ||
+                  ((u64)w * h == (u64)bw * bh && fmt == 1 && !bgr)))) {
                 best = m; bw = w; bh = h;
                 bgr = (fmt == 1);
+                best_rank = rank;
                 have = 1;
             }
         }
@@ -217,7 +224,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *ST_) {
         param->fb_width = Gop->Mode->Info->HorizontalResolution;
         param->fb_height = Gop->Mode->Info->VerticalResolution;
         param->fb_pitch = Gop->Mode->Info->PixelsPerScanLine;
-        puts_ascii("GOP ");
+        puts_ascii("GOP/HDMI framebuffer ");
         put_hex(param->fb_width);
         puts_ascii("x");
         put_hex(param->fb_height);
