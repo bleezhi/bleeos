@@ -69,21 +69,27 @@ __attribute__((aligned(64))) static u64 erst[2];
 __attribute__((aligned(64))) static u8 out_ctx[4096];
 __attribute__((aligned(64))) static u8 in_ctx[4096];
 __attribute__((aligned(64))) static trb_t ep_ring[32];
+__attribute__((aligned(64))) static trb_t kbd_rings[2][32];
+__attribute__((aligned(64))) static trb_t mouse_rings[2][32];
 __attribute__((aligned(64))) static u8 ctrl_buf[256];
 
 typedef struct {
-    int used, port, slot, speed;
+    int used, index, port, slot, speed;
     u8 mps, kbd_ep, mouse_ep, kbd_mps, mouse_mps;
     int kbd_toggle, mouse_toggle;
     u8 prev[6], mod;
     int ep_i, ep_cycle;
+    int k_i,k_cycle,m_i,m_cycle;
 } xdev_t;
 static xdev_t devs[2];
+static int ndev;
+static u8 kbuf[2][8], mbuf[2][4];
+static int k_pending[2], m_pending[2];
 
 static inline u32 rr(u32 o){ return *(volatile u32 *)(mmio+o); }
 static inline void rw(u32 o,u32 v){ *(volatile u32 *)(mmio+o)=v; }
 static void zero(void *p,u32 n){u8 *q=p;while(n--)*q++=0;}
-static u64 ptr64(const void *p){return (u64)(u32)(uintptr_t)p;}
+static u64 ptr64(const void *p){return (u64)(u32)p;}
 
 static int wait32(u32 off,u32 mask,u32 want,u32 loops){
     while(loops--) if((rr(off)&mask)==want) return 0;
@@ -114,7 +120,7 @@ static int event_wait(u32 type,u32 *slot,u32 *status,u32 timeout){
         ev_i++;
         if(ev_i==64){ev_i=0;ev_cycle^=1;}
         ev_dequeue=(u32)ptr64(&event_ring[ev_i]);
-        rw(rt+0x38,ev_dequeue|0);
+        rw(rt+0x38,ev_dequeue|8);
         if(et==type){
             if(slot)*slot=sl;
             if(status)*status=(st>>24)&255;
@@ -125,8 +131,10 @@ static int event_wait(u32 type,u32 *slot,u32 *status,u32 timeout){
     return -1;
 }
 static int command(u32 a,u32 b,u32 c,u32 d,u32 *slot){
+    u32 status=0;
     cmd_put(a,b,c,d);
-    return event_wait(TRB_COMPLETION,slot,0,500);
+    if(event_wait(TRB_COMPLETION,slot,&status,500))return -1;
+    return status==COMP_SUCCESS?0:-1;
 }
 
 static void ctx32(u8 *base,int idx,u32 a,u32 b,u32 c,u32 d,u32 e){
@@ -224,7 +232,7 @@ static int configure_ep(xdev_t*d,u8 epnum,u8 mps,u8 interval){
     u32 *ep=ic+8+epnum*8;
     u32 dir=epnum&1;
     ep[0]=((u32)interval<<16);
-    ep[1]=(3u<<3)|((u32)mps<<16);
+    ep[1]=(((epnum&1)?7u:3u)<<3)|((u32)mps<<16);
     ep[2]=(u32)ptr64(ep_ring)|1;ep[3]=(u32)(ptr64(ep_ring)>>32);
     ep[4]=8;
     return command((u32)ptr64(in_ctx),(u32)(ptr64(in_ctx)>>32),0,
@@ -248,6 +256,7 @@ static int find_xhci(pci_dev_t*out){
 int xhci_init(void){
     pci_dev_t d;u32 bar,cap,off,hcc,slots,ports;
     if(ready)return 0;
+    ndev=0;
     if(find_xhci(&d))return -1;
     bar=d.bars[0];
     if(!(bar&1)&&((bar&6)==4) && d.bars[1]) return -1; /* 64-bit BAR above 32-bit address space */
@@ -300,6 +309,7 @@ int xhci_init(void){
 }
 int xhci_present(void){return ready;}
 int xhci_nports(void){return ready?maxports:0;}
+int xhci_ndev(void){return ndev;}
 int xhci_connected(int p){
     if(!ready||p<0||p>=maxports)return 0;
     return (rr(op+XOP_PORTS+p*0x10)&PORT_CCS)?1:0;
@@ -311,8 +321,10 @@ int xhci_enumerate_port(int p,int index){
     /* Only USB 1.x/2.0 device speeds for this first xHCI HID backend. */
     if(speed==0||speed>3)return -1;
     ep_ring_reset();
+    for(int z=0;z<32;z++){trb_clear(&kbd_rings[index][z]);trb_clear(&mouse_rings[index][z]);}
+    make_link(kbd_rings[index]);make_link(mouse_rings[index]);
     if(enable_slot(&slot))return -1;
-    xdev_t *x=&devs[index];zero(x,sizeof(*x));x->used=1;x->port=p+1;x->slot=slot;
+    xdev_t *x=&devs[index];zero(x,sizeof(*x));x->used=1;x->index=index;x->port=p+1;x->slot=slot;
     x->speed=speed;x->mps=(speed==3)?64:8;x->ep_i=0;x->ep_cycle=1;
     if(address_device(x))return -1;
     if(getdesc(x,1,d,18))return -1;
@@ -343,39 +355,44 @@ int xhci_enumerate_port(int p,int index){
     if(!config||ifnum<0||(!kep&&!mep))return -1;
     if(setcfg(x,(u8)config))return -1;
     if(setproto(x,(u8)ifnum))return -1;
-    if(kep){if(configure_ep(x,(u8)(kep*2),kmps,10))return -1;x->kbd_ep=kep;x->kbd_mps=kmps;}
-    if(mep){if(configure_ep(x,(u8)(mep*2+1),mmps,10))return -1;x->mouse_ep=mep;x->mouse_mps=mmps;}
+    if(kep){if(configure_ep(x,(u8)(kep*2+1),kmps,10))return -1;x->kbd_ep=kep;x->kbd_mps=kmps;}
+    if(mep){if(configure_ep(x,(u8)(mep*2),mmps,10))return -1;x->mouse_ep=mep;x->mouse_mps=mmps;}
+    if(index>=ndev)ndev=index+1;
     return 0;
 }
-int xhci_intr_in(int index,u8 ep,u8 mps,void*buf,int len){
-    if(!ready||index<0||index>=2||!devs[index].used||!ep)return -1;
-    xdev_t*x=&devs[index];int i=x->ep_i,c=x->ep_cycle;trb_t*t=&ep_ring[i];
-    t->a=(u32)ptr64(buf);t->b=(u32)(ptr64(buf)>>32);t->c=len;
-    t->d=TRB_NORMAL|TRB_IOC|(u32)c;i++;if(i==31){i=0;x->ep_cycle^=1;}x->ep_i=i;
-    rw(db+x->slot*4,(ep*2)); /* endpoint doorbell target uses endpoint id */
-    return xfer_wait(x->slot,0);
+static int poll_transfer_event(u32 slot,u32 *status){
+    trb_t *e=&event_ring[ev_i];
+    if((e->d&1u)!=((u32)ev_cycle))return 0;
+    u32 et=(e->d>>10)&63, st=e->c;
+    ev_i++;if(ev_i==64){ev_i=0;ev_cycle^=1;}
+    ev_dequeue=(u32)ptr64(&event_ring[ev_i]);rw(rt+0x38,ev_dequeue|8);
+    if(et!=TRB_TRANSFER)return 0;if(status)*status=(st>>24)&255;return 1;
+}
+static void queue_intr(xdev_t*x,u8 ep,void*buf,int len){
+    trb_t*ring=(ep&1)?kbd_rings[x->index]:mouse_rings[x->index];
+    int *pi=(ep&1)?&x->k_i:&x->m_i,*pc=(ep&1)?&x->k_cycle:&x->m_cycle;
+    trb_t*t=&ring[*pi];int cyc=*pc;t->a=(u32)ptr64(buf);t->b=(u32)(ptr64(buf)>>32);t->c=len;t->d=TRB_NORMAL|TRB_IOC|(u32)cyc;
+    (*pi)++;if(*pi==31){*pi=0;*pc^=1;}rw(db+x->slot*4,(u32)(ep*2+1));
 }
 int xhci_hid_trykey(int index,int *out){
-    u8 r[8];xdev_t*x=&devs[index];if(!x->used||!x->kbd_ep)return -1;
-    if(xhci_intr_in(index,x->kbd_ep,x->kbd_mps,r,8))return -1;
-    x->mod=r[0];
-    for(int i=0;i<6;i++){u8 k=r[2+i];int held=0;for(int j=0;j<6;j++)if(x->prev[j]==k&&k)held=1;
-        if(!k||held)continue;x->prev[i]=k;
-        if(k==0x4f){*out=0x103;return 0;}if(k==0x50){*out=0x102;return 0;}
-        if(k==0x51){*out=0x101;return 0;}if(k==0x52){*out=0x100;return 0;}
+    if(!ready||index<0||index>=ndev||!devs[index].used||!devs[index].kbd_ep)return -1;
+    xdev_t*x=&devs[index];u32 st;
+    if(!k_pending[index]){queue_intr(x,x->kbd_ep,kbuf[index],8);k_pending[index]=1;return -1;}
+    int ev=poll_transfer_event(x->slot,&st);if(!ev)return -1;k_pending[index]=0;
+    if(st!=COMP_SUCCESS&&st!=COMP_SHORT)return -1;
+    u8*r=kbuf[index];x->mod=r[0];
+    for(int i=0;i<6;i++){u8 k=r[2+i];int held=0;for(int j=0;j<6;j++)if(x->prev[j]==k&&k)held=1;if(!k||held)continue;x->prev[i]=k;
+        if(k==0x4f){*out=0x103;return 0;}if(k==0x50){*out=0x102;return 0;}if(k==0x51){*out=0x101;return 0;}if(k==0x52){*out=0x100;return 0;}
         if(k==0x4a){*out=0x104;return 0;}if(k==0x4d){*out=0x105;return 0;}if(k==0x4c){*out=0x106;return 0;}
-        static const char*lo="abcdefghijklmnopqrstuvwxyz";
-        static const char*hi="ABCDEFGHIJKLMNOPQRSTUVWXYZ";char c=0;
-        if(k>=4&&k<=29)c=(x->mod&3)?hi[k-4]:lo[k-4];
-        else if(k>=0x1e&&k<=0x27){static const char*n="1234567890";static const char*s="!@#$%^&*()";c=(x->mod&3)?s[k-0x1e]:n[k-0x1e];}
-        else {static const char ch[]="\n\b\t -=[]\\;'\`,";switch(k){case 0x28:c='\n';break;case 0x2c:c=' ';break;case 0x2a:c='\b';break;case 0x2b:c='\t';break;case 0x2d:c=(x->mod&3)?'_':'-';break;case 0x2e:c=(x->mod&3)?'+':'=';break;case 0x2f:c=(x->mod&3)?'{':'[';break;case 0x30:c=(x->mod&3)?'}':']';break;default:(void)ch;}}
-        if(c){*out=(u8)c;return 0;}
-    }
-    for(int i=0;i<6;i++)if(!r[2+i])x->prev[i]=0;
-    return -1;
+        char ch=0;if(k>=4&&k<=29){static const char*lo="abcdefghijklmnopqrstuvwxyz";static const char*hi="ABCDEFGHIJKLMNOPQRSTUVWXYZ";ch=(x->mod&3)?hi[k-4]:lo[k-4];}
+        else if(k>=0x1e&&k<=0x27){static const char*n="1234567890";static const char*q="!@#$%^&*()";ch=(x->mod&3)?q[k-0x1e]:n[k-0x1e];}
+        else switch(k){case 0x28:ch='\\n';break;case 0x2c:ch=' ';break;case 0x2a:ch='\\b';break;case 0x2b:ch='\\t';break;case 0x2d:ch=(x->mod&3)?'_':'-';break;case 0x2e:ch=(x->mod&3)?'+':'=';break;case 0x2f:ch=(x->mod&3)?'{':'[';break;case 0x30:ch=(x->mod&3)?'}':']';break;default:break;}
+        if(ch){*out=(u8)ch;return 0;}}
+    for(int i=0;i<6;i++)if(!r[2+i])x->prev[i]=0;return -1;
 }
 int xhci_hid_mouse(int index,int*dx,int*dy,int*btn){
-    u8 r[4];xdev_t*x=&devs[index];if(!x->used||!x->mouse_ep)return 0;
-    if(xhci_intr_in(index,x->mouse_ep,x->mouse_mps,r,4))return 0;
-    *btn=r[0]&7;*dx=(int)(signed char)r[1];*dy=-(int)(signed char)r[2];return 1;
+    if(!ready||index<0||index>=ndev||!devs[index].used||!devs[index].mouse_ep)return 0;
+    xdev_t*x=&devs[index];u32 st;if(!m_pending[index]){queue_intr(x,x->mouse_ep,mbuf[index],4);m_pending[index]=1;return 0;}
+    int ev=poll_transfer_event(x->slot,&st);if(!ev)return 0;m_pending[index]=0;if(st!=COMP_SUCCESS&&st!=COMP_SHORT)return 0;
+    u8*r=mbuf[index];*btn=r[0]&7;*dx=(int)(signed char)r[1];*dy=-(int)(signed char)r[2];return 1;
 }
