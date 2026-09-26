@@ -3,6 +3,7 @@
 int xhci_init(void);
 int xhci_present(void);
 int xhci_nports(void);
+int xhci_ndev(void);
 int xhci_connected(int port);
 int xhci_enumerate_port(int port,int index);
 int xhci_hid_trykey(int index,int *out);
