@@ -10,6 +10,7 @@
 #include "users.h"
 #include "uhci.h"
 #include "tui.h"
+#include "aap.h"
 #include "pkg.h"
 #include "e1000.h"
 #include "net.h"
@@ -855,6 +856,7 @@ static int b_poweroff(int argc, char **argv, const char *in) {
     return 0;
 }
 static int b_gui(int argc, char **argv, const char *in);
+static int b_aap(int argc, char **argv, const char *in) { (void)argc; (void)argv; (void)in; return aap_run(); }
 static int b_install(int argc, char **argv, const char *in);
 static int b_logout(int argc, char **argv, const char *in);
 static int b_su(int argc, char **argv, const char *in);
@@ -913,6 +915,11 @@ static const char MAN_REBOOT[] = "reboot - reboot the machine\nUsage: reboot\n";
 static const char MAN_HALT[] =
     "halt/poweroff - halt the CPU\nUsage: halt\n";
 static const char MAN_VER[] = "ver - OS version\nUsage: ver\n";
+static const char MAN_AAP[] =
+    "aap - ASCII animation editor\nUsage: aap\n"
+    "Keyboard editor: arrows move, printable keys draw, Del erases.\n"
+    "N/B change frames, D duplicates, C clears, P previews,\n"
+    "S saves to /aap, L loads from /aap, Esc quits.\n";
 static const char MAN_GUI[] =
     "gui - graphical desktop\nUsage: gui\n"
     "Login screen (checks /etc/shadow), then 640x480 VBE desktop.\n"
@@ -989,7 +996,7 @@ static int b_help(int argc, char **argv, const char *in) {
              "  pwd ls cd mkdir touch rm cat env export unset sleep uptime date\n"
              "  history true false test exit reboot halt poweroff gui vgaregs\n"
              "  install logout su passwd useradd userdel users usb\n"
-             "  run pkg net ping mem\n"
+             "  run pkg net ping mem aap\n"
              "Syntax: ; && ||  $VAR $?  > >> <  quotes  (see `man shell`)\n");
     return 0;
 }
@@ -1027,6 +1034,7 @@ static const cmd_t cmds[] = {
     {"halt", "halt CPU", MAN_HALT, b_poweroff},
     {"poweroff", "halt CPU", MAN_HALT, b_poweroff},
     {"gui", "graphical desktop", MAN_GUI, b_gui},
+    {"aap", "ASCII animation editor", MAN_AAP, b_aap},
     {"vgaregs", "dump VGA regs", MAN_VGAREGS, b_vgaregs},
     {"install", "install to HDD", MAN_INSTALL, b_install},
     {"logout", "back to login", MAN_USERS, b_logout},
