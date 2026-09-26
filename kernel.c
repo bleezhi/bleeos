@@ -6,6 +6,7 @@
 #include "ata.h"
 #include "usb.h"
 #include "uhci.h"
+#include "xhci.h"
 #include "users.h"
 #include "irq.h"
 #include "heap.h"
