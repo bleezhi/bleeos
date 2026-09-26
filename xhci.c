@@ -98,6 +98,27 @@ static void zero(void *p,u32 n){u8 *q=p;while(n--)*q++=0;}
 static void status_ok(const char *s){klog("[ OK ] xHCI: ");klog(s);klog("\n");}
 static void status_warn(const char *s){klog("[ !!! ] xHCI: ");klog(s);klog("\n");}
 static void status_err(const char *s){klog("[ ERR ] xHCI: ");klog(s);klog("\n");}
+static void diag_u32(const char *name,u32 v){
+    char b[12]; klog("[ !!! ] xHCI: "); klog(name); klog("="); klog(utoa10(v,b)); klog("\n");
+}
+static void command_diag(void){
+    diag_u32("USBSTS",rr(op+XOP_STS));
+    diag_u32("USBCMD",rr(op+XOP_CMD));
+    diag_u32("CONFIG",rr(op+XOP_CONFIG));
+    diag_u32("CRCR_lo",rr(op+XOP_CRCR));
+    diag_u32("CRCR_hi",rr(op+XOP_CRCR+4));
+    diag_u32("DB0",rr(db));
+    diag_u32("ERSTSZ",rr(rt+0x28));
+    diag_u32("ERSTBA_lo",rr(rt+0x30));
+    diag_u32("ERSTBA_hi",rr(rt+0x34));
+    diag_u32("ERDP_lo",rr(rt+0x38));
+    diag_u32("ERDP_hi",rr(rt+0x3c));
+    diag_u32("CMD_TRB_a",cmd_ring[cmd_i].a);
+    diag_u32("CMD_TRB_b",cmd_ring[cmd_i].b);
+    diag_u32("CMD_TRB_c",cmd_ring[cmd_i].c);
+    diag_u32("CMD_TRB_d",cmd_ring[cmd_i].d);
+    diag_u32("EV_TRB_d",event_ring[ev_i].d);
+}
 
 static u64 ptr64(const void *p){return (u64)(u32)p;}
 static u32 *ctx(u8 *base,int idx){return (u32 *)(base+idx*ctx_size);}
@@ -143,9 +164,18 @@ static int event_wait(u32 type,u32 *slot,u32 *status,u32 timeout){
 }
 static int command(u32 a,u32 b,u32 c,u32 d,u32 *slot){
     u32 status=0;
+    if(d==TRB_ENABLE_SLOT){
+        status_ok("Enable Slot: command ring state");
+        command_diag();
+    }
     cmd_put(a,b,c,d);
+    if(d==TRB_ENABLE_SLOT){
+        status_ok("Enable Slot: doorbell rung");
+        command_diag();
+    }
     if(event_wait(TRB_COMPLETION,slot,&status,500)){
         status_err("command completion timeout");
+        if(d==TRB_ENABLE_SLOT)command_diag();
         return -1;
     }
     if(status!=COMP_SUCCESS){
