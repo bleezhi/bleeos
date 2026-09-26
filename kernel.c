@@ -9,6 +9,62 @@
 #include "users.h"
 #include "irq.h"
 #include "heap.h"
+#include "fbcon.h"
+#include "vbe.h"
+#include "uefiparam.h"
+
+extern u8 boot_drive_override;   /* bootmenu.c: 0xFF = read MBR byte */
+
+/* UEFI boot state, set by uefi_main before entering boot_main */
+static int uefi_mode;
+static int uefi_inst;
+
+/* 1 on UEFI boot (GOP text console); BIOS/VBE path otherwise. Used to
+ * guard features that assume the legacy boot environment. */
+int uefi_active(void) { return uefi_mode; }
+
+static void kernel_early(void) {
+    {
+        /* fixed 56KB heap clear of everything: kernel image ends
+         * below 0x60000 (asserted), installer snapshot ends at
+         * 0x60200, stack at 0x90000 */
+        extern char __bss_end;
+        ASSERT((u32)&__bss_end <= 0x60000u, "kernel too big for heap");
+        if (heap_init(0x62000u, 0x70000u))
+            panic("heap init failed");
+    }
+    irq_init();    /* IDT + PIC (IF still clear) */
+    timer_init();  /* PIT 100Hz + sti: interrupts live from here */
+}
+
+void uefi_main(void) {
+    uefiparam_t *p = (uefiparam_t *)UEFIPARAM_ADDR;
+    int gop_ok = 0;
+    vga_clear();   /* real VGA: harmless even if a GOP owns the screen */
+    serial_init();
+    serial_print("BleeOS UEFI entry\n");
+    kernel_early();
+    if (p->magic == UEFIPARAM_MAGIC && p->has_gop &&
+        fbcon_init((u32)(p->fb_base & 0xFFFFFFFFull),
+                   (u32)(p->fb_base >> 32),
+                   (int)p->fb_width,
+                   (int)p->fb_height, (int)p->fb_pitch) == 0) {
+        vga_set_backend(&fbcon_backend);
+        vbe_uefi_init(fbcon_lfb(), fbcon_width(),
+                      fbcon_height(), fbcon_pitch());
+        gop_ok = 1;
+    }
+    if (!gop_ok)
+        serial_print("uefi: no GOP framebuffer; serial log only\n");
+    boot_drive_override = 0xE0;   /* never a BIOS DL */
+    uefi_mode = 1;
+    uefi_inst = (p->magic == UEFIPARAM_MAGIC && p->installed) ? 1 : 0;
+    {
+        extern void boot_main(void);
+        boot_main();   /* menu + kernel_main, all on the fbcon backend */
+    }
+    for (;;) { cli(); hlt(); }   /* menu only returns via reboot/off */
+}
 
 static int has_opt(const char *cmdline, const char *opt) {
     int ol = 0;
@@ -30,17 +86,7 @@ void kernel_main(const boot_info_t *info) {
 
     vga_clear();
     serial_init();
-    {
-        /* fixed 64KB heap clear of everything: kernel image ends
-         * below 0x60000 (asserted), scratch areas live at 0x40000,
-         * stack at 0x90000 */
-        extern char __bss_end;
-        ASSERT((u32)&__bss_end <= 0x60000u, "kernel too big for heap");
-        if (heap_init(0x60000u, 0x70000u))
-            panic("heap init failed");
-    }
-    irq_init();    /* IDT + PIC (IF still clear) */
-    timer_init();  /* PIT 100Hz + sti: interrupts live from here */
+    kernel_early();
     vga_setcolor(0x0B);
     klog("==============================\n"
          "  BleeOS 0.3 - 32-bit mode\n"
@@ -65,9 +111,13 @@ void kernel_main(const boot_info_t *info) {
     }
     vga_print("Type `help` for commands, `exit` for boot menu.\n");
     {
-        /* installed = booted from hard disk (BIOS DL 0x80+): the user
-         * DB then persists on reserved HDD sectors across reboots */
-        int installed = info && info->magic == BOOT_MAGIC &&
+        /* installed = HDD boot (BIOS DL 0x80+) or UEFI-on-HD flag:
+         * the user DB then persists on reserved HDD sectors */
+        int installed;
+        if (uefi_mode)
+            installed = uefi_inst;
+        else
+            installed = info && info->magic == BOOT_MAGIC &&
                         (info->boot_drive & 0x80);
         users_set_installed(installed);
         if (installed) vga_print("installed on HDD: users persist.\n");

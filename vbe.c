@@ -15,6 +15,16 @@ enum {
 
 static int cur_w, cur_h, cur_bpp;
 static u32 cur_lfb;
+/* UEFI QObject: GOP owns the mode; dispi must not be touched behind
+ * its back (it would desync the firmware framebuffer). */
+static int uefi_gop;
+static int uefi_pitch;
+
+void vbe_uefi_init(u32 lfb, int w, int h, int pitch) {
+    cur_lfb = lfb; cur_w = w; cur_h = h; cur_bpp = 32;
+    uefi_pitch = pitch >= w ? pitch : w;
+    uefi_gop = 1;
+}
 
 static void vbe_write(u16 idx, u16 val) {
     outw(VBE_IDX, idx);
@@ -137,11 +147,19 @@ static u32 find_lfb(void) {
 }
 
 int vbe_available(void) {
+    if (uefi_gop) return cur_lfb != 0;
     u16 id = vbe_read(VBE_ID);
     return id >= 0xB0C0 && id <= 0xB0C5;
 }
 
 int vbe_set(int w, int h, int bpp) {
+    if (uefi_gop) {
+        /* no mode switch without boot services: run the desktop at
+         * the native GOP resolution. Accept iff 32bpp asked. */
+        if (bpp != 32 || !cur_lfb) return -1;
+        (void)w; (void)h;
+        return 0;
+    }
     if (!vbe_available()) return -1;
     if (bpp != 32) return -1;   /* XRGB8888 only for now */
     u32 lfb = find_lfb();
@@ -160,6 +178,7 @@ int vbe_set(int w, int h, int bpp) {
 }
 
 void vbe_disable(void) {
+    if (uefi_gop) return;   /* GOP has no text mode; fbcon stays live */
     /* ENABLE=0 alone restores SeaBIOS text timing (verified on QEMU);
      * hand-rolled register restore cleared the planes, so don't. */
     vbe_write(VBE_BANK, 0);
@@ -173,6 +192,7 @@ u32 vbe_lfb(void) { return cur_lfb; }
 int vbe_width(void) { return cur_w; }
 int vbe_height(void) { return cur_h; }
 int vbe_bpp(void) { return cur_bpp; }
+int vbe_pitch(void) { return uefi_gop ? uefi_pitch : cur_w; }
 
 /* debug: VBE enable/xres/yres/bpp + first 32 bytes of font plane 2 */
 void vbe_state(void) {

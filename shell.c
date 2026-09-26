@@ -933,9 +933,10 @@ static const char MAN_INSTALL[] =
     "install - Debian-like OS installer (TUI)\nUsage: install\n"
     "Stepped wizard (root only): welcome, hostname, root\n"
     "password, optional user, disk confirm, progress bar.\n"
-    "Writes boot sector + kernel (225 sectors) to LBA 0 of\n"
+    "Writes boot sector + kernel (257 sectors) to LBA 0 of\n"
     "the ATA primary master and verifies. Hostname, users\n"
-    "and passwords persist on installed systems.\n";
+    "and passwords persist on installed systems.\n"
+    "BIOS boot only (unavailable on UEFI boot).\n";
 static const char MAN_USERS[] =
     "users - login accounts\n"
     "TUI login at boot checks /etc/passwd + /etc/shadow\n"
@@ -974,7 +975,7 @@ static const char MAN_PKG[] =
     "Run installed scripts with `run /pkg/<name>/...`.\n";
 static const char MAN_MEM[] =
     "mem - heap statistics\nUsage: mem\n"
-    "Shows the kernel heap arena (64KB at 0x60000): total,\n"
+    "Shows the kernel heap arena (56KB at 0x62000): total,\n"
     "used, free and block count.\n";
 static const char MAN_SHELL[] =
     "Shell syntax: ' \" quotes, \\ escape, $VAR $? $$,\n"
@@ -1126,16 +1127,24 @@ static int b_gui(int argc, char **argv, const char *in) {    (void)argc; (void)a
 /* installer image: MBR + stage2 as loaded by the bootloader, still
  * intact in RAM (nothing reuses 0x7C00+ after boot) */
 #define INSTALL_SRC ((const u8 *)0x7C00u)
-#define INSTALL_SECTORS 225   /* 1 MBR + STAGE2_SECTORS (see Makefile) */
+#define INSTALL_SECTORS 257   /* 1 MBR + STAGE2_SECTORS (see Makefile) */
 /* snapshot area: free RAM above the kernel, below the stack.
  * (Was 0x30000; the kernel's .bss grew past it and the snapshot
  * trashed cap_active/devs/etc. Guarded below against recurrence.) */
 #define INSTALL_SNAP ((u8 *)0x40000u)
-#define INSTALL_SNAP_END ((u8 *)0x5C200u)   /* +225 sectors, worst case */
+#define INSTALL_SNAP_END ((u8 *)0x60200u)   /* +257 sectors, worst case */
 
 static int b_install(int argc, char **argv, const char *in) {
     (void)argc; (void)argv; (void)in;
     ata_dev_t d;
+    if (uefi_active()) {
+        /* UEFI boot has no MBR/stage2 image at 0x7C00 to snapshot,
+         * so there is nothing trustworthy to write. */
+        tui_msg("Error", "install: not supported on UEFI boot;\n"
+                "boot the floppy/USB image (BIOS) to install");
+        vga_clear();
+        return 1;
+    }
     if (sh_in_term()) {
         sh_eprint("install: use the text console (needs full 80 cols)\n");
         return 1;
@@ -1156,7 +1165,7 @@ static int b_install(int argc, char **argv, const char *in) {
         return 1;
     }
     if (d.sectors < INSTALL_SECTORS) {
-        tui_msg("Error", "install: disk too small (need 225 sectors)");
+        tui_msg("Error", "install: disk too small (need 257 sectors)");
         vga_clear();
         return 1;
     }

@@ -6,6 +6,9 @@
 #include "drivers.h"
 #include "boot.h"
 
+/* 0xFF = read the MBR byte (BIOS boot); UEFI sets a real value. */
+u8 boot_drive_override = 0xFF;
+
 void kernel_main(const boot_info_t *info);
 
 #define NENTRIES 4
@@ -121,11 +124,15 @@ static int menu_loop(char cmdlines[2][128]) {
 
 void boot_main(void) {
     /* BIOS drive number saved by the MBR at a fixed address
-     * (MBR_BOOT_DRIVE in boot.asm, enforced by the Makefile) */
+     * (MBR_BOOT_DRIVE in boot.asm, enforced by the Makefile).
+     * Under UEFI the loader overrides it (no MBR was run). */
     static boot_info_t info;
+    u8 mbr_dl;
     info.magic = BOOT_MAGIC;
     info.boot_sec = rtc_seconds();
-    info.boot_drive = *(volatile u8 *)0x7D3B;
+    mbr_dl = *(volatile u8 *)0x7D3B;
+    info.boot_drive = boot_drive_override != 0xFF ? boot_drive_override
+                                                  : mbr_dl;
 
     static char cmdlines[2][128];
     for (int e = 0; e < 2; e++) {

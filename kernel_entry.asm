@@ -7,6 +7,7 @@
 section .text
 global _start
 extern boot_main
+extern uefi_main
 extern __bss_start
 extern __bss_end
 
@@ -73,10 +74,54 @@ protected_entry:
 
     call boot_main
 
-.hang:
+.phang:
     cli
     hlt
-    jmp .hang
+    jmp .phang
+
+; --- UEFI entry: loader already dropped to 32-bit PM with a flat
+; GDT (code 0x08, data 0x10). Same Bring-up, minus the real-mode
+; prelude. Never returns (uefi_main loops via the shell/menu). ---
+global uefi_entry
+uefi_entry:
+    cli                         ; firmware may leave IRQs on
+    mov ax, DATA_SEG
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+    mov esp, 0x90000
+    cld
+    mov edi, __bss_start
+    mov ecx, __bss_end
+    sub ecx, edi
+    jz .ubss_done
+    xor eax, eax
+    shr ecx, 2
+    jz .ubss_bytes
+.ubss_words:
+    mov [edi], eax
+    add edi, 4
+    dec ecx
+    jnz .ubss_words
+.ubss_bytes:
+    mov ecx, __bss_end
+    sub ecx, edi
+.ubss_tail:
+    test ecx, ecx
+    jz .ubss_done
+    mov [edi], al
+    inc edi
+    dec ecx
+    jmp .ubss_tail
+.ubss_done:
+    call uefi_main
+
+.uhang:
+    cli
+    hlt
+    jmp .uhang
 
 ; ---------------- GDT: null + 32-bit code + 32-bit data (4GB flat) ----------------
 align 8

@@ -12,6 +12,11 @@ u32  vbe_lfb(void);                    /* linear framebuffer phys addr */
 int  vbe_width(void);
 int  vbe_height(void);
 int  vbe_bpp(void);
+int  vbe_pitch(void);                  /* pixels per scanline (>= width) */
 void vbe_state(void);
+/* UEFI: adopt the GOP framebuffer instead of programming Bochs VBE.
+ * After this, vbe_set keeps the GOP mode (0 ok) and vbe_disable is
+ * a no-op (the fbcon text console owns the screen). */
+void vbe_uefi_init(u32 lfb, int w, int h, int pitch);
 
 #endif

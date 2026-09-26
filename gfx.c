@@ -12,13 +12,16 @@
 
 static u32 *fb;    /* visible LFB */
 static u32 *draw;  /* shadow buffer */
-static int fw, fh;
+static int fw, fh, fpitch;   /* fpitch = pixels per LFB scanline (>= fw) */
 static int cx0, cy0, cx1, cy1;   /* clip rect, exclusive max */
 
-void gfx_init(u32 *f, int w, int h) {
-    fb = f; fw = w; fh = h;
+void gfx_init_pitch(u32 *f, int w, int h, int pitch) {
+    fb = f; fw = w; fh = h; fpitch = pitch >= w ? pitch : w;
     if (!draw) draw = SHADOW_BASE;
     gfx_noclip();
+}
+void gfx_init(u32 *f, int w, int h) {
+    gfx_init_pitch(f, w, h, w);
 }
 void gfx_clip(int x, int y, int w, int h) {
     cx0 = x < 0 ? 0 : x; cy0 = y < 0 ? 0 : y;
@@ -157,6 +160,9 @@ static const u8 *glyph(char c) {
     return font[c - 0x20];
 }
 
+/* glyph for external users (fbcon); same 0x20-0x7E coverage */
+const u8 *gfx_glyph(char c) { return glyph(c); }
+
 void gfx_textn(int x, int y, const char *s, int n, u32 fg, u32 bg) {
     for (int i = 0; i < n && s[i]; i++) {
         const u8 *g = glyph(s[i]);
@@ -183,9 +189,19 @@ int gfx_textw(const char *s) {
 }
 
 void gfx_present(void) {
-    u32 n = (u32)(fw * fh);
-    u32 *s = draw, *d = fb;
-    __asm__ volatile ("cld; rep movsl"
-                      : "+S" (s), "+D" (d), "+c" (n)
-                      : : "memory");
+    if (fpitch == fw) {
+        u32 n = (u32)(fw * fh);
+        u32 *s = draw, *d = fb;
+        __asm__ volatile ("cld; rep movsl"
+                          : "+S" (s), "+D" (d), "+c" (n)
+                          : : "memory");
+        return;
+    }
+    for (int y = 0; y < fh; y++) {
+        u32 *s = draw + (u32)(y * fw), *d = fb + (u32)(y * fpitch);
+        u32 n = (u32)fw;
+        __asm__ volatile ("cld; rep movsl"
+                          : "+S" (s), "+D" (d), "+c" (n)
+                          : : "memory");
+    }
 }

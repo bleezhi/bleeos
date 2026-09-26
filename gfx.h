@@ -7,6 +7,8 @@
 #define RGB(r, g, b) ((u32)(((r) & 0xFF) << 16 | ((g) & 0xFF) << 8 | ((b) & 0xFF)))
 
 void gfx_init(u32 *fb, int w, int h);
+/* fb with a stride != width (GOP modes where pitch > width) */
+void gfx_init_pitch(u32 *fb, int w, int h, int pitch);
 void gfx_clip(int x, int y, int w, int h);
 void gfx_noclip(void);
 void gfx_pixel(int x, int y, u32 c);
@@ -23,5 +25,7 @@ int  gfx_w(void);
 int  gfx_h(void);
 /* blit the shadow buffer to the visible LFB (call after a frame) */
 void gfx_present(void);
+/* 8x8 glyph rows for a char (0x20-0x7E, space otherwise) */
+const unsigned char *gfx_glyph(char c);
 
 #endif

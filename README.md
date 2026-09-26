@@ -41,7 +41,7 @@ ATA PIO driver (primary bus, LBA28, polled). The kernel reports a
 detected primary master at boot; `install` is a Debian-like TUI
 wizard (root only): welcome, hostname, root password, optional
 user, disk confirm, progress bar, reboot. It writes boot sector +
-kernel (225 sectors) to LBA 0, verifies, then flushes hostname +
+kernel (257 sectors) to LBA 0, verifies, then flushes hostname +
 users to the user DB so the installed system boots with them.
 Dialogs are modal boxes (blue screen, gray box, shadow, red
 title, red buttons); errors use the same style (no-disk offers
@@ -105,6 +105,25 @@ guest changes are needed and users stay volatile. Tested with
 `run-cd` (`-boot order=d`): boots to the login prompt, root shell
 works.
 
+## UEFI (`make esp.img`, `make run-uefi`)
+`BOOTX64.EFI` (freestanding x86_64, no gnu-efi — minimal EFI headers
+in `uefi/efi.h`, PE32+ linked with GNU `ld -mi386pep`) plus the same
+flat `kernel.bin` live on a FAT16 ESP built by `tools/mkesp.py`
+(MBR wrapper, 0x0E partition — partitionless superfloppies don't
+boot on OVMF). The loader reads the kernel to its link address
+`0x7E00`, records the GOP framebuffer in `uefiparam_t` at `0x7000`,
+exits boot services, drops long mode → 32-bit protected mode
+(`uefi/tramp.S`, run from low RAM), and jumps to `uefi_entry`.
+The kernel runs the same menu/shell on a GOP text console
+(`fbcon.h/.c`: 8x8 blits, `vga_backend` so shell/login/TUI run
+unmodified) and the desktop at the native GOP mode (`vbe_uefi_init`
+adopts the GOP instead of programming VBE; `gfx_init_pitch` handles
+pitch != width). `install` refuses on UEFI boot (no MBR image in
+RAM to snapshot). Tested end-to-end under OVMF (`-bios
+OVMF.4m.fd`): auto-boot to login, root shell, `mem`, `gui`
+desktop at 1280x800x32. Requires `qemu-system-x86_64` and OVMF
+(`/usr/share/edk2-ovmf/x64/OVMF.4m.fd`, overridable via `OVMF=`).
+
 ## Packages (`pkg`, `run`, website)
 Offline package manager: `.blee` archives (magic `BLEEPKG1`, name,
 version, entries, FNV-1a checksum; <= 8192 bytes, paths <= 64,
@@ -147,6 +166,7 @@ change, not on a fixed tick.
 ## Build & run
 
 Requires `nasm`, 32-bit-capable `gcc`, `binutils`, `qemu-system-i386`.
+UEFI targets additionally need `qemu-system-x86_64` and OVMF firmware.
 
 ```sh
 make

@@ -67,7 +67,8 @@ void wm_set_user(const char *name) {
 int wm_set_resolution(int w, int h) {
     if (w == gfx_w() && h == gfx_h()) return 0;
     if (vbe_set(w, h, 32)) return -1;
-    gfx_init((u32 *)vbe_lfb(), w, h);
+    gfx_init_pitch((u32 *)vbe_lfb(), vbe_width(), vbe_height(),
+                   vbe_pitch());
     if (mx >= w) mx = w - 1;
     if (my >= h) my = h - 1;
     for (int i = 0; i < MAXWIN; i++) {
@@ -308,7 +309,8 @@ static void on_button(int down) {
 
 int wm_init(void) {
     if (vbe_set(640, 480, 32)) return 1;
-    gfx_init((u32 *)vbe_lfb(), vbe_width(), vbe_height());
+    gfx_init_pitch((u32 *)vbe_lfb(), vbe_width(), vbe_height(),
+                   vbe_pitch());
     for (int i = 0; i < MAXWIN; i++) wins[i].used = 0;
     norder = 0; dragging = 0; quit = 0; dirty = 1;
     mx = gfx_w() / 2; my = gfx_h() / 2; mbtn = 0;

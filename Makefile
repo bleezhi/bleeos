@@ -3,6 +3,9 @@ CC=gcc
 LD=ld
 OBJCOPY=objcopy
 QEMU=qemu-system-i386
+QEMU64=qemu-system-x86_64
+# OVMF firmware for UEFI boot (edk2-ovmf package path; override if needed)
+OVMF ?= /usr/share/edk2-ovmf/x64/OVMF.4m.fd
 
 # Keep the VGA device enabled and prefer SDL for the host window. Fall back
 # to no display only when no graphical session is available.
@@ -11,13 +14,13 @@ QEMU=qemu-system-i386
 DISPLAY_BACKEND ?= $(if $(or $(DISPLAY),$(WAYLAND_DISPLAY)),sdl,none)
 
 # MBR loads this many sectors (must cover the whole stage2 binary)
-STAGE2_SECTORS=224
+STAGE2_SECTORS=256
 
 CFLAGS=-m32 -march=i386 -mno-mmx -mno-sse -mno-sse2 -ffreestanding -nostdlib -nostartfiles -nodefaultlibs \
        -fno-builtin -fno-stack-protector -fno-pie -no-pie \
        -Wall -Wextra -O2 -std=gnu11
 
-OBJS=kernel_entry.o drivers.o bootmenu.o shell.o kernel.o vbe.o gfx.o mouse.o wm.o apps.o login.o ata.o users.o uhci.o usb.o tui.o pkg.o doom.o e1000.o net.o vt.o term.o irq.o irq_c.o heap.o pci.o
+OBJS=kernel_entry.o drivers.o bootmenu.o shell.o kernel.o vbe.o gfx.o mouse.o wm.o apps.o login.o ata.o users.o uhci.o usb.o tui.o pkg.o doom.o e1000.o net.o vt.o term.o irq.o irq_c.o heap.o pci.o fbcon.o
 
 all: os.img
 
@@ -38,7 +41,7 @@ bootmenu.o: bootmenu.c drivers.h boot.h
 shell.o: shell.c shell.h drivers.h
 	$(CC) $(CFLAGS) -c shell.c -o shell.o
 
-kernel.o: kernel.c drivers.h boot.h shell.h
+kernel.o: kernel.c drivers.h boot.h shell.h fbcon.h vbe.h uefiparam.h
 	$(CC) $(CFLAGS) -c kernel.c -o kernel.o
 
 vbe.o: vbe.c vbe.h drivers.h
@@ -94,6 +97,9 @@ net.o: net.c net.h e1000.h drivers.h
 
 vt.o: vt.c vt.h drivers.h
 	$(CC) $(CFLAGS) -c vt.c -o vt.o
+
+fbcon.o: fbcon.c fbcon.h gfx.h drivers.h
+	$(CC) $(CFLAGS) -c fbcon.c -o fbcon.o
 
 term.o: term.c wm.h gfx.h vt.h shell.h drivers.h
 	$(CC) $(CFLAGS) -c term.c -o term.o
@@ -206,7 +212,44 @@ run-debug: os.img
 		-serial file:/tmp/opencode/serial.log \
 		-drive file=os.img,format=raw,if=floppy -boot order=a,strict=on -net none
 
+# ---- UEFI boot (WIP): BOOTX64.EFI loader + kernel.bin on a FAT16 ESP ----
+UEFI_CFLAGS=-m64 -ffreestanding -nostdlib -nostartfiles -nodefaultlibs \
+       -fno-builtin -fno-ident -fno-stack-protector -fno-pie -no-pie -fpic \
+       -mno-red-zone -fshort-wchar \
+       -Wall -Wextra -O2 -std=gnu11
+# NOTE: -fpic but no GOT in the end: all data refs are RIP-relative and
+# the trampoline symbols are hidden (see loader.c), so the PE carries a
+# single anchor reloc. -fno-ident drops .comment: ld would place it
+# outside SizeOfImage and EDK2 rejects such images (Load Error).
+# uefi_entry's linked address, for the loader's 32-bit jump target
+UEFI_ENTRY_ADDR=0x$(shell nm kernel.elf | sed -n 's/^\([0-9a-f]*\) T uefi_entry$$/\1/p')
+
+uefi/loader.o: uefi/loader.c uefi/efi.h uefiparam.h
+	$(CC) $(UEFI_CFLAGS) -DUEFI_ENTRY_ADDR=$(UEFI_ENTRY_ADDR) -c uefi/loader.c -o uefi/loader.o
+
+uefi/tramp.o: uefi/tramp.S
+	$(CC) $(UEFI_CFLAGS) -c uefi/tramp.S -o uefi/tramp.o
+
+BOOTX64.EFI: uefi/loader.o uefi/tramp.o kernel.elf
+	@test -n "$(UEFI_ENTRY_ADDR)" || (echo "ERROR: uefi_entry not found"; exit 1)
+	$(LD) -mi386pep --subsystem=10 --enable-reloc-section -e efi_main -o BOOTX64.EFI uefi/loader.o uefi/tramp.o
+	@echo "uefi loader: entry $(UEFI_ENTRY_ADDR)"
+
+esp.img: BOOTX64.EFI kernel.bin tools/mkesp.py
+	python3 tools/mkesp.py BOOTX64.EFI kernel.bin esp.img
+
+# UEFI rig: OVMF + ESP on IDE. Serial mirrors the kernel log
+# (banner, menu); the shell itself uses the GOP framebuffer console.
+run-uefi: esp.img
+	$(QEMU64) -machine accel=kvm:tcg -m 128 -vga std -display $(DISPLAY_BACKEND) \
+		-bios $(OVMF) \
+		-monitor unix:/tmp/opencode/qemu-mon,server,nowait \
+		-qmp unix:/tmp/opencode/qmp.sock,server,nowait \
+		-serial file:/tmp/opencode/serial-uefi.log \
+		-drive file=esp.img,format=raw,if=ide -boot order=c,strict=on -net none
+
 clean:
 	rm -f boot.bin $(OBJS) kernel.elf kernel.bin os.img
+	rm -f uefi/loader.o uefi/tramp.o BOOTX64.EFI esp.img
 
 .PHONY: all run run-nographic clean

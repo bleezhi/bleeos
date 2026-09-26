@@ -96,6 +96,12 @@ char *utoa10(u32 v, char *buf);     /* decimal, NUL-terminated, returns buf */
 u32 slen(const char *s);
 int scmp(const char *a, const char *b);   /* 0 = equal */
 
+/* ---------- VGA 16-color palette (shared by vt/fbcon) ---------- */
+u32 vga_rgb(u8 i);   /* palette index -> 0xRRGGBB */
+
+/* 1 when booted via UEFI (GOP console); 0 on legacy BIOS boot. */
+int uefi_active(void);
+
 /* ---------- serial log (COM1) + dual output ---------- */
 void serial_init(void);               /* 38400 8N1, polled */
 void serial_putc(char c);             /* '\n' -> "\r\n" */
