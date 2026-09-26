@@ -10,7 +10,6 @@
 #include "users.h"
 #include "uhci.h"
 #include "tui.h"
-#include "aap.h"
 #include "pkg.h"
 #include "e1000.h"
 #include "net.h"
@@ -856,7 +855,6 @@ static int b_poweroff(int argc, char **argv, const char *in) {
     return 0;
 }
 static int b_gui(int argc, char **argv, const char *in);
-static int b_aap(int argc, char **argv, const char *in) { (void)argc; (void)argv; (void)in; return aap_run(); }
 static int b_install(int argc, char **argv, const char *in);
 static int b_logout(int argc, char **argv, const char *in);
 static int b_su(int argc, char **argv, const char *in);
@@ -1034,7 +1032,6 @@ static const cmd_t cmds[] = {
     {"halt", "halt CPU", MAN_HALT, b_poweroff},
     {"poweroff", "halt CPU", MAN_HALT, b_poweroff},
     {"gui", "graphical desktop", MAN_GUI, b_gui},
-    {"aap", "ASCII animation editor", MAN_AAP, b_aap},
     {"vgaregs", "dump VGA regs", MAN_VGAREGS, b_vgaregs},
     {"install", "install to HDD", MAN_INSTALL, b_install},
     {"logout", "back to login", MAN_USERS, b_logout},
