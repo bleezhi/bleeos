@@ -108,7 +108,7 @@ static void cmd_put(u32 a,u32 b,u32 c,u32 d){
     trb_t *t=&cmd_ring[cmd_i];
     t->a=a;t->b=b;t->c=c;t->d=(d&~1u)|(u32)cmd_cycle;
     cmd_i++;
-    if(cmd_i==31){cmd_i=0;cmd_cycle^=1;}
+    if(cmd_i==31){cmd_ring[31].d=TRB_TYPE(6)|TRB_LINK_TOGGLE|(u32)cmd_cycle;cmd_i=0;cmd_cycle^=1;}
     rw(db,0);
 }
 static int event_wait(u32 type,u32 *slot,u32 *status,u32 timeout){
@@ -376,7 +376,7 @@ static void queue_intr(xdev_t*x,u8 ep,void*buf,int len){
     trb_t*ring=(ep&1)?kbd_rings[x->index]:mouse_rings[x->index];
     int *pi=(ep&1)?&x->k_i:&x->m_i,*pc=(ep&1)?&x->k_cycle:&x->m_cycle;
     trb_t*t=&ring[*pi];int cyc=*pc;t->a=(u32)ptr64(buf);t->b=(u32)(ptr64(buf)>>32);t->c=len;t->d=TRB_NORMAL|TRB_IOC|(u32)cyc;
-    (*pi)++;if(*pi==31){*pi=0;*pc^=1;}rw(db+x->slot*4,(u32)(ep*2+1));
+    (*pi)++;if(*pi==31){ring[31].d=TRB_TYPE(6)|TRB_LINK_TOGGLE|(u32)(*pc);*pi=0;*pc^=1;}rw(db+x->slot*4,(u32)(ep*2+1));
 }
 int xhci_hid_trykey(int index,int *out){
     if(!ready||index<0||index>=ndev||!devs[index].used||!devs[index].kbd_ep)return -1;
