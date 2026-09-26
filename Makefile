@@ -29,7 +29,7 @@ all: os.img
 
 boot.bin: boot.asm
 	$(AS) -f bin boot.asm -o boot.bin
-	@od -A n -t x1 -v boot.bin | tr -d ' \n' | grep -q '88163b7d' || \
+	@od -A n -t x1 -v boot.bin | tr -d ' \\n' | grep -q '88163b7d' || \\
 		(echo "ERROR: boot_drive moved from 0x7D3B; update bootmenu.c"; exit 1)
 
 kernel_entry.o: kernel_entry.asm
@@ -167,9 +167,9 @@ run-usb: os.img
 hdd.img:
 	qemu-img create -f raw hdd.img 100M
 
-# TODO:	Write proper explanation for why i changed -accel kvm:tcg to -machine accel=kvm:tcg
-# 		Right now im just trying to get the commands working
-#		- Luted
+# TODO:\tWrite proper explanation for why i changed -accel kvm:tcg to -machine accel=kvm:tcg
+# \t\tRight now im just trying to get the commands working
+# \t\t- Luted
 
 run-install: os.img hdd.img
 	$(QEMU) -machine accel=kvm:tcg -vga std -display $(DISPLAY_BACKEND) \
@@ -184,13 +184,17 @@ run-hdd: hdd.img
 		-qmp unix:/tmp/opencode/qmp.sock,server,nowait \
 		-drive file=hdd.img,format=raw,if=ide -boot order=c,strict=on -net none
 
-# Bootable ISO (El Torito floppy emulation: the BIOS boots os.img
-# as drive 0, so no guest changes are needed; users stay volatile).
-iso: os.img
+# Bootable ISO: BIOS uses os.img as the El Torito floppy entry, while UEFI
+# uses esp.img as the El Torito EFI System Partition entry.
+iso: os.img esp.img
 	mkdir -p iso_root
 	cp os.img iso_root/boot.img
+	cp esp.img iso_root/efiboot.img
 	cp README.md iso_root/README.TXT
-	xorrisofs -o bleeos.iso -V BLEEOS -b boot.img -c boot.cat iso_root/
+	xorrisofs -o bleeos.iso -V BLEEOS \
+		-b boot.img -c boot.cat \
+		-eltorito-alt-boot -e efiboot.img -no-emul-boot \
+		iso_root/
 	rm -rf iso_root
 	@echo "Built bleeos.iso ($$(stat -c%s bleeos.iso) bytes)"
 
