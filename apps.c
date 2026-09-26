@@ -8,6 +8,140 @@
 #define BTN RGB(60, 120, 220)
 #define BTN_T RGB(255, 255, 255)
 
+
+/* ---------- AAP: GUI ASCII animation editor ---------- */
+#define AAP_W 32
+#define AAP_H 14
+#define AAP_FRAMES 8
+#define AAP_CW 12
+#define AAP_CH 16
+#define AAP_X 14
+#define AAP_Y 48
+#define AAP_TIMELINE_Y 290
+
+static char aap_frames[AAP_FRAMES][AAP_W * AAP_H];
+static int aap_frame;
+static int aap_x, aap_y;
+static int aap_play;
+static win_t *aap_win;
+
+static void aap_clear_frame(int f) {
+    for (int i = 0; i < AAP_W * AAP_H; i++) aap_frames[f][i] = ' ';
+}
+static void aap_reset(void) {
+    for (int f = 0; f < AAP_FRAMES; f++) aap_clear_frame(f);
+    aap_frame = 0; aap_x = 0; aap_y = 0; aap_play = 0;
+}
+static void aap_copy_frame(int from, int to) {
+    for (int i = 0; i < AAP_W * AAP_H; i++) aap_frames[to][i] = aap_frames[from][i];
+}
+static void aap_draw_button(int cx, int cy, int x, int y, int w, const char *s, int active) {
+    gfx_fill(cx + x, cy + y, w, 24, active ? RGB(40, 160, 70) : RGB(60, 120, 220));
+    gfx_rect(cx + x, cy + y, w, 24, INK);
+    gfx_text(cx + x + (w - gfx_textw(s)) / 2, cy + y + 8, s, RGB(255,255,255), GFX_TRANS);
+}
+static void aap_draw(win_t *w, int cx, int cy) {
+    (void)w;
+    gfx_text(cx + 14, cy + 10, "ASCII ANIMATION EDITOR", INK, GFX_TRANS);
+    gfx_text(cx + 14, cy + 26, "click a cell to place @; keys type characters", RGB(80,80,80), GFX_TRANS);
+
+    /* canvas */
+    gfx_fill(cx + AAP_X - 2, cy + AAP_Y - 2, AAP_W * AAP_CW + 4, AAP_H * AAP_CH + 4, RGB(255,255,255));
+    gfx_rect(cx + AAP_X - 2, cy + AAP_Y - 2, AAP_W * AAP_CW + 4, AAP_H * AAP_CH + 4, RGB(20,20,20));
+    for (int y = 0; y < AAP_H; y++) {
+        for (int x = 0; x < AAP_W; x++) {
+            int px = cx + AAP_X + x * AAP_CW;
+            int py = cy + AAP_Y + y * AAP_CH;
+            char s[2] = { aap_frames[aap_frame][y * AAP_W + x], 0 };
+            gfx_text(px + 2, py + 4, s, INK, GFX_TRANS);
+            gfx_rect(px, py, AAP_CW, AAP_CH, RGB(220,220,220));
+        }
+    }
+    /* cursor */
+    gfx_rect(cx + AAP_X + aap_x * AAP_CW, cy + AAP_Y + aap_y * AAP_CH,
+             AAP_CW, AAP_CH, RGB(30,90,200));
+
+    /* timeline */
+    gfx_text(cx + 14, cy + AAP_TIMELINE_Y - 18, "FRAMES", INK, GFX_TRANS);
+    for (int f = 0; f < AAP_FRAMES; f++) {
+        int bx = cx + 14 + f * 68;
+        gfx_fill(bx, cy + AAP_TIMELINE_Y, 62, 34, f == aap_frame ? RGB(40,160,70) : RGB(210,215,220));
+        gfx_rect(bx, cy + AAP_TIMELINE_Y, 62, 34, INK);
+        char b[4] = { '0' + f, 0, 0, 0 };
+        gfx_text(bx + 27, cy + AAP_TIMELINE_Y + 13, b, f == aap_frame ? RGB(255,255,255) : INK, GFX_TRANS);
+    }
+
+    aap_draw_button(cx, cy, 14, AAP_TIMELINE_Y + 44, 64, "Prev", 0);
+    aap_draw_button(cx, cy, 84, AAP_TIMELINE_Y + 44, 64, "Next", 0);
+    aap_draw_button(cx, cy, 154, AAP_TIMELINE_Y + 44, 64, "Dup", 0);
+    aap_draw_button(cx, cy, 224, AAP_TIMELINE_Y + 44, 64, "Clear", 0);
+    aap_draw_button(cx, cy, 294, AAP_TIMELINE_Y + 44, 64, aap_play ? "Stop" : "Play", aap_play);
+
+    gfx_text(cx + 372, cy + AAP_TIMELINE_Y + 51, "Keys: arrows move, printable keys draw, Space erases, P previews", INK, GFX_TRANS);
+}
+static void aap_click(win_t *w, int x, int y, int btn) {
+    (void)w; (void)btn;
+    if (x >= AAP_X && y >= AAP_Y && x < AAP_X + AAP_W * AAP_CW && y < AAP_Y + AAP_H * AAP_CH) {
+        aap_x = (x - AAP_X) / AAP_CW;
+        aap_y = (y - AAP_Y) / AAP_CH;
+        aap_frames[aap_frame][aap_y * AAP_W + aap_x] = '@';
+        wm_dirty();
+        return;
+    }
+    if (y >= AAP_TIMELINE_Y && y < AAP_TIMELINE_Y + 34) {
+        for (int f = 0; f < AAP_FRAMES; f++)
+            if (x >= 14 + f * 68 && x < 14 + f * 68 + 62) {
+                aap_frame = f; aap_x = aap_y = 0; wm_dirty(); return;
+            }
+    }
+    if (y >= AAP_TIMELINE_Y + 44 && y < AAP_TIMELINE_Y + 68) {
+        if (x >= 14 && x < 78) aap_frame = (aap_frame + AAP_FRAMES - 1) % AAP_FRAMES;
+        else if (x >= 84 && x < 148) aap_frame = (aap_frame + 1) % AAP_FRAMES;
+        else if (x >= 154 && x < 218) { int n = (aap_frame + 1) % AAP_FRAMES; aap_copy_frame(aap_frame, n); aap_frame = n; }
+        else if (x >= 224 && x < 288) aap_clear_frame(aap_frame);
+        else if (x >= 294 && x < 358) { aap_play ^= 1; wm_require_fps(aap_play ? 8 : 0); }
+        wm_dirty();
+    }
+}
+static int aap_key(int k) {
+    if (!aap_win || !aap_win->used) return 0;
+    if (k == KEY_LEFT && aap_x > 0) aap_x--;
+    else if (k == KEY_RIGHT && aap_x < AAP_W - 1) aap_x++;
+    else if (k == KEY_UP && aap_y > 0) aap_y--;
+    else if (k == KEY_DOWN && aap_y < AAP_H - 1) aap_y++;
+    else if (k == KEY_DEL || k == '\b' || k == ' ') aap_frames[aap_frame][aap_y * AAP_W + aap_x] = ' ';
+    else if (k >= 32 && k < 127) {
+        aap_frames[aap_frame][aap_y * AAP_W + aap_x] = (char)k;
+        if (aap_x < AAP_W - 1) aap_x++;
+    } else return 0;
+    wm_dirty();
+    return 1;
+}
+static void aap_tick(void) {
+    if (!aap_play) return;
+    aap_frame = (aap_frame + 1) % AAP_FRAMES;
+}
+void apps_aap_reset(void) {
+    aap_reset();
+    aap_win = 0;
+}
+void apps_aap_closed(int id) {
+    if (aap_win && aap_win->id == id) {
+        aap_win = 0;
+        aap_play = 0;
+        wm_require_fps(0);
+    }
+}
+void apps_open_aap(void) {
+    aap_reset();
+    aap_win = wm_open("ASCII Animator", 20, 36, 560, 390, aap_draw, aap_click, 0);
+}
+int apps_aap_key(int k) {
+    if (!aap_win || !aap_win->used) return 0;
+    if (k == 'p' || k == 'P') { aap_play ^= 1; wm_require_fps(aap_play ? 8 : 0); wm_dirty(); return 1; }
+    return aap_key(k);
+}
+
 /* ---------- Counter ---------- */
 static int counter_n;
 
