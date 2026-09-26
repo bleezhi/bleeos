@@ -67,9 +67,9 @@ __attribute__((aligned(64))) static u64 dcbaa[256];
 __attribute__((aligned(64))) static trb_t cmd_ring[32];
 __attribute__((aligned(64))) static trb_t event_ring[64];
 __attribute__((aligned(64))) static u64 erst[2];
-__attribute__((aligned(64))) static u8 out_ctx[4096];
+__attribute__((aligned(64))) static u8 out_ctx[2][4096];
 __attribute__((aligned(64))) static u8 in_ctx[4096];
-__attribute__((aligned(64))) static trb_t ep_ring[32];
+__attribute__((aligned(64))) static trb_t ctrl_rings[2][32];
 __attribute__((aligned(64))) static trb_t kbd_rings[2][32];
 __attribute__((aligned(64))) static trb_t mouse_rings[2][32];
 __attribute__((aligned(64))) static u8 ctrl_buf[256];
@@ -150,9 +150,9 @@ static void make_link(trb_t *r){
     r[31].a=(u32)ptr64(r);r[31].b=0;r[31].c=0;
     r[31].d=TRB_TYPE(6)|TRB_LINK_TOGGLE|1;
 }
-static void ep_ring_reset(void){
-    for(int i=0;i<32;i++)trb_clear(&ep_ring[i]);
-    make_link(ep_ring);
+static void ep_ring_reset(int index){
+    for(int i=0;i<32;i++)trb_clear(&ctrl_rings[index][i]);
+    make_link(ctrl_rings[index]);
 }
 static void ep_put(u32 a,u32 b,u32 c,u32 flags){
     trb_t *t=&ep_ring[devs[0].ep_i];
@@ -212,10 +212,10 @@ static int address_device(xdev_t*d){
     sc[1]=(u32)d->port<<16;
     ep[0]=(3u<<16); /* interval 0, CErr=3 */
     ep[1]=(4u<<3)|((u32)d->mps<<16);
-    ep[2]=(u32)ptr64(ep_ring)|1;
-    ep[3]=(u32)(ptr64(ep_ring)>>32);
+    ep[2]=(u32)ptr64(ctrl_rings[d->index])|1;
+    ep[3]=(u32)(ptr64(ctrl_rings[d->index])>>32);
     ep[4]=8;
-    dcbaa[d->slot]=(u64)ptr64(out_ctx);
+    dcbaa[d->slot]=(u64)ptr64(out_ctx[d->index]);
     u32 st=0;
     if(command((u32)ptr64(in_ctx),(u32)(ptr64(in_ctx)>>32),0,
                TRB_ADDR_DEV|((u32)d->slot<<24),&st))return -1;
@@ -230,7 +230,7 @@ static int configure_ep(xdev_t*d,u8 epnum,u8 mps,u8 interval){
     sc[1]=(u32)d->port<<16;
     u32 *e0=ctx(in_ctx,2);
     e0[0]=3u<<16;e0[1]=(4u<<3)|((u32)d->mps<<16);
-    e0[2]=(u32)ptr64(ep_ring)|1;e0[3]=(u32)(ptr64(ep_ring)>>32);e0[4]=8;
+    e0[2]=(u32)ptr64(ctrl_rings[d->index])|1;e0[3]=(u32)(ptr64(ctrl_rings[d->index])>>32);e0[4]=8;
     u32 *ep=ctx(in_ctx,epnum);
     ep[0]=((u32)interval<<16);
     ep[1]=(((epnum&1)?7u:3u)<<3)|((u32)mps<<16);
@@ -322,7 +322,7 @@ int xhci_enumerate_port(int p,int index){
     if(index<0||index>=2||!port_reset(p,&speed))return -1;
     /* Only USB 1.x/2.0 device speeds for this first xHCI HID backend. */
     if(speed==0||speed>3)return -1;
-    ep_ring_reset();
+    ep_ring_reset(index);
     for(int z=0;z<32;z++){trb_clear(&kbd_rings[index][z]);trb_clear(&mouse_rings[index][z]);}
     make_link(kbd_rings[index]);make_link(mouse_rings[index]);
     if(enable_slot(&slot))return -1;
