@@ -272,10 +272,14 @@ static int port_reset(int p,int*speed){
     u32 v=*ps;
     if(!(v&PORT_CCS))return -1;
     if(!(v&PORT_PP))*ps=v|PORT_PP;
+    /* USB2 port reset: wait for the reset-change event, acknowledge it,
+     * then require the port to become enabled before enumeration. */
     v=*ps;*ps=v|PORT_PR;
     for(int i=0;i<100;i++){sleep_ms(1);v=*ps;if(v&PORT_PRC)break;}
     if(!(v&PORT_PRC))return -1;
     *ps=v|PORT_PRC;
+    for(int i=0;i<100;i++){sleep_ms(1);v=*ps;if(v&PORT_PED)break;}
+    if(!(v&PORT_PED))return -1;
     v=*ps;
     if(speed)*speed=PORT_SPEED(v);
     return 0;
