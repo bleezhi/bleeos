@@ -114,7 +114,8 @@ term.o: term.c wm.h gfx.h vt.h shell.h drivers.h
 pkgs:
 	python3 tools/mkblee.py packages/hello packages/hello.blee
 	python3 tools/mkblee.py packages/quote packages/quote.blee
-	cp packages/hello.blee packages/quote.blee docs/
+	python3 tools/mkblee.py packages/aap packages/aap.blee
+	cp packages/hello.blee packages/quote.blee packages/aap.blee docs/
 
 uhci.o: uhci.c uhci.h pci.h drivers.h
 	$(CC) $(CFLAGS) -c uhci.c -o uhci.o
