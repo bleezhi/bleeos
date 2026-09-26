@@ -95,6 +95,10 @@ static inline u32 rr(u32 o){ return *(volatile u32 *)(mmio+o); }
 static inline void rw(u32 o,u32 v){ *(volatile u32 *)(mmio+o)=v; }
 static inline void rw64(u32 o,u64 v){ rw(o,(u32)v); rw(o+4,(u32)(v>>32)); }
 static void zero(void *p,u32 n){u8 *q=p;while(n--)*q++=0;}
+static void status_ok(const char *s){klog("[ OK ] xHCI: ");klog(s);klog("\n");}
+static void status_warn(const char *s){klog("[ !!! ] xHCI: ");klog(s);klog("\n");}
+static void status_err(const char *s){klog("[ ERR ] xHCI: ");klog(s);klog("\n");}
+
 static u64 ptr64(const void *p){return (u64)(u32)p;}
 static u32 *ctx(u8 *base,int idx){return (u32 *)(base+idx*ctx_size);}
 
@@ -372,30 +376,83 @@ int xhci_connected(int p){
 int xhci_enumerate_port(int p,int index){
     u8 d[18],cfg[256];int speed,slot;int total,pos,config=0,ifnum=-1;
     u8 kep=0,mep=0,kmps=8,mmps=4;
-    if(index<0||index>=2||!port_reset(p,&speed))return -1;
-    /* Only USB 1.x/2.0 device speeds for this first xHCI HID backend. */
-    /* xHCI speed IDs: 1 low, 2 full, 3 high, 4 super, 5+ newer.
-     * This HID backend currently only has USB2 boot-protocol descriptors,
-     * but do not reject a SuperSpeed port before reporting it. */
-    if(speed==0||speed>15)return -1;
-    if(speed>3)return -1;
+    char msg[64];
+
+    if(index<0||index>=2){
+        status_err("invalid HID slot");
+        return -1;
+    }
+
+    if(!xhci_connected(p)){
+        status_warn("port not connected");
+        return -1;
+    }
+
+    if(port_reset(p,&speed)){
+        status_err("port reset failed");
+        return -1;
+    }
+    status_ok("port reset");
+
+    if(speed==0||speed>15){
+        status_err("invalid USB speed");
+        return -1;
+    }
+    if(speed>3){
+        status_warn("SuperSpeed device not supported yet");
+        return -1;
+    }
+
     ep_ring_reset(index);
     for(int z=0;z<32;z++){trb_clear(&kbd_rings[index][z]);trb_clear(&mouse_rings[index][z]);}
     make_link(kbd_rings[index]);make_link(mouse_rings[index]);
-    if(enable_slot(&slot))return -1;
+
+    if(enable_slot(&slot)){
+        status_err("Enable Slot failed");
+        return -1;
+    }
+    status_ok("Enable Slot");
+
     xdev_t *x=&devs[index];zero(x,sizeof(*x));x->used=1;x->index=index;x->port=p+1;x->slot=slot;
     x->speed=speed;x->mps=(speed==3)?64:8;x->ep_i=0;x->ep_cycle=1;
-    if(address_device(x))return -1;
-    if(getdesc(x,1,d,18))return -1;
+
+    if(address_device(x)){
+        status_err("Address Device failed");
+        return -1;
+    }
+    status_ok("Address Device");
+
+    if(getdesc(x,1,d,18)){
+        status_err("device descriptor failed");
+        return -1;
+    }
+    status_ok("device descriptor");
+
     x->mps=d[7]?d[7]:x->mps;
-    /* Re-addressing isn't necessary; update EP0 MPS through Evaluate Context. */
     zero(in_ctx,2048);u32 *ic=(u32*)in_ctx;ic[1]=1u<<1;
     u32 *e0=ctx(in_ctx,2);e0[1]=(4u<<3)|((u32)x->mps<<16);
     if(command((u32)ptr64(in_ctx),(u32)(ptr64(in_ctx)>>32),0,
-               TRB_EVAL_CONTEXT|((u32)slot<<24),0))return -1;
-    if(getdesc(x,2,cfg,9))return -1;
-    total=cfg[2]|((int)cfg[3]<<8);if(total<9) return -1;if(total>256)total=256;
-    if(getdesc(x,2,cfg,total))return -1;
+               TRB_EVAL_CONTEXT|((u32)slot<<24),0)){
+        status_err("Evaluate Context failed");
+        return -1;
+    }
+
+    if(getdesc(x,2,cfg,9)){
+        status_err("config descriptor header failed");
+        return -1;
+    }
+    total=cfg[2]|((int)cfg[3]<<8);
+    if(total<9){
+        status_err("invalid config descriptor");
+        return -1;
+    }
+    if(total>256)total=256;
+    if(getdesc(x,2,cfg,total)){
+        status_err("config descriptor failed");
+        return -1;
+    }
+    status_ok("config descriptor");
+
     pos=0;
     while(pos+2<=total){
         int l=cfg[pos],t=cfg[pos+1];if(l<2||pos+l>total)break;
@@ -411,12 +468,47 @@ int xhci_enumerate_port(int p,int index){
             }
         } pos+=l;
     }
-    if(!config||ifnum<0||(!kep&&!mep))return -1;
-    if(setcfg(x,(u8)config))return -1;
-    if(setproto(x,(u8)ifnum))return -1;
-    if(kep){if(configure_ep(x,(u8)(kep*2+1),kmps,10))return -1;x->kbd_ep=kep;x->kbd_mps=kmps;}
-    if(mep){if(configure_ep(x,(u8)(mep*2+1),mmps,10))return -1;x->mouse_ep=mep;x->mouse_mps=mmps;}
+
+    if(!config||ifnum<0||(!kep&&!mep)){
+        status_warn("no boot HID interface");
+        return -1;
+    }
+    status_ok("boot HID interface");
+
+    if(setcfg(x,(u8)config)){
+        status_err("Set Configuration failed");
+        return -1;
+    }
+    status_ok("Set Configuration");
+
+    if(setproto(x,(u8)ifnum)){
+        status_err("Set Protocol failed");
+        return -1;
+    }
+    status_ok("Set Protocol");
+
+    if(kep){
+        if(configure_ep(x,(u8)(kep*2+1),kmps,10)){
+            status_err("keyboard endpoint failed");
+            return -1;
+        }
+        x->kbd_ep=kep;x->kbd_mps=kmps;
+        status_ok("keyboard endpoint");
+    }
+    if(mep){
+        if(configure_ep(x,(u8)(mep*2+1),mmps,10)){
+            status_err("mouse endpoint failed");
+            return -1;
+        }
+        x->mouse_ep=mep;x->mouse_mps=mmps;
+        status_ok("mouse endpoint");
+    }
+
+    if(kep||mep) status_ok("HID device ready");
+    else status_warn("HID device has no usable endpoints");
+
     if(index>=ndev)ndev=index+1;
+    (void)msg;
     return 0;
 }
 static int poll_transfer_event(u32 slot,u8 epid,u32 *status){
