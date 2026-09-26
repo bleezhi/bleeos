@@ -155,18 +155,19 @@ void kernel_main(const boot_info_t *info) {
         vga_print("installed on HDD: users persist.\n");
     }
     {
-        /* USB stub: detector only, PS/2 stays live */
+        /* USB HID is optional: PS/2 remains an independent fallback. */
         usb_scan();
+        if (xhci_present()) {
+            char num[12];
+            vga_print("usb: xHCI active, HID devices=");
+            vga_print(utoa10((u32)xhci_ndev(), num));
+            vga_print("\n");
+        }
         if (uhci_present()) {
             char num[12];
-            int c0 = uhci_connected(0), c1 = uhci_connected(1);
-            vga_print("usb: UHCI detected @");
+            vga_print("usb: UHCI active, HID fallback available @");
             vga_print(utoa10(uhci_iobase(), num));
-            vga_print(" p0=");
-            vga_print(c0 > 0 ? "dev" : "empty");
-            vga_print(" p1=");
-            vga_print(c1 > 0 ? "dev" : "empty");
-            vga_print(" (stub, PS/2 active)\n");
+            vga_print("\n");
         }
     }
     shell_run(info ? info->boot_sec : 0, verbose);
