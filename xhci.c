@@ -92,7 +92,9 @@ static u8 kbuf[2][8], mbuf[2][4];
 static int k_pending[2], m_pending[2];
 
 static inline u32 rr(u32 o){ return *(volatile u32 *)(mmio+o); }
-static inline void rw(u32 o,u32 v){ *(volatile u32 *)(mmio+o)=v; }\nstatic inline void rw64(u32 o,u64 v){ rw(o,(u32)v); rw(o+4,(u32)(v>>32)); }\nstatic void zero(void *p,u32 n){u8 *q=p;while(n--)*q++=0;}
+static inline void rw(u32 o,u32 v){ *(volatile u32 *)(mmio+o)=v; }
+static inline void rw64(u32 o,u64 v){ rw(o,(u32)v); rw(o+4,(u32)(v>>32)); }
+static void zero(void *p,u32 n){u8 *q=p;while(n--)*q++=0;}
 static u64 ptr64(const void *p){return (u64)(u32)p;}
 static u32 *ctx(u8 *base,int idx){return (u32 *)(base+idx*ctx_size);}
 
@@ -441,7 +443,8 @@ int xhci_hid_trykey(int index,int *out){
         if(k==0x4a){*out=0x104;return 0;}if(k==0x4d){*out=0x105;return 0;}if(k==0x4c){*out=0x106;return 0;}
         char ch=0;if(k>=4&&k<=29){static const char*lo="abcdefghijklmnopqrstuvwxyz";static const char*hi="ABCDEFGHIJKLMNOPQRSTUVWXYZ";ch=(x->mod&3)?hi[k-4]:lo[k-4];}
         else if(k>=0x1e&&k<=0x27){static const char*n="1234567890";static const char*q="!@#$%^&*()";ch=(x->mod&3)?q[k-0x1e]:n[k-0x1e];}
-        else switch(k){case 0x28:ch='\n';break;case 0x2c:ch=' ';break;case 0x2a:ch='\b';break;case 0x2b:ch='\t';break;case 0x2d:ch=(x->mod&3)?'_':'-';break;case 0x2e:ch=(x->mod&3)?'+':'=';break;case 0x2f:ch=(x->mod&3)?'{':'[';break;case 0x30:ch=(x->mod&3)?'}':']';break;default:break;}
+        else switch(k){case 0x28:ch='
+';break;case 0x2c:ch=' ';break;case 0x2a:ch='\b';break;case 0x2b:ch='\t';break;case 0x2d:ch=(x->mod&3)?'_':'-';break;case 0x2e:ch=(x->mod&3)?'+':'=';break;case 0x2f:ch=(x->mod&3)?'{':'[';break;case 0x30:ch=(x->mod&3)?'}':']';break;default:break;}
         if(ch){*out=(u8)ch;return 0;}}
     for(int i=0;i<6;i++)if(!r[2+i])x->prev[i]=0;return -1;
 }
