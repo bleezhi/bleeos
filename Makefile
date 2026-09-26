@@ -20,7 +20,7 @@ CFLAGS=-m32 -march=i386 -mno-mmx -mno-sse -mno-sse2 -ffreestanding -nostdlib -no
        -fno-builtin -fno-stack-protector -fno-pie -no-pie \
        -Wall -Wextra -O2 -std=gnu11
 
-OBJS=kernel_entry.o drivers.o bootmenu.o shell.o kernel.o vbe.o gfx.o mouse.o wm.o apps.o login.o ata.o users.o uhci.o usb.o tui.o pkg.o doom.o e1000.o net.o vt.o term.o irq.o irq_c.o heap.o pci.o fbcon.o hdimg.o
+OBJS=kernel_entry.o drivers.o bootmenu.o shell.o kernel.o vbe.o gfx.o mouse.o wm.o apps.o login.o ata.o users.o uhci.o xhci.o usb.o tui.o pkg.o doom.o e1000.o net.o vt.o term.o irq.o irq_c.o heap.o pci.o fbcon.o hdimg.o
 # install blobs: boot.bin (MBR for HD targets) + BOOTX64.EFI (ESP for HD
 # targets), embedded as binary objects for the installer backend
 BOOTBINDS=bootbind.o loaderbind.o
@@ -120,7 +120,10 @@ pkgs:
 uhci.o: uhci.c uhci.h pci.h drivers.h
 	$(CC) $(CFLAGS) -c uhci.c -o uhci.o
 
-usb.o: usb.c usb.h uhci.h drivers.h
+xhci.o: xhci.c xhci.h pci.h drivers.h
+	$(CC) $(CFLAGS) -c xhci.c -o xhci.o
+
+usb.o: usb.c usb.h uhci.h xhci.h drivers.h
 	$(CC) $(CFLAGS) -c usb.c -o usb.o
 
 kernel.elf: $(OBJS) $(BOOTBINDS) linker.ld
