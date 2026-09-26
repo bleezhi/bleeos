@@ -13,35 +13,31 @@
 #include "fbcon.h"
 #include "vbe.h"
 #include "uefiparam.h"
+#include "amd_display.h"
+#include "pci.h"
 
-extern u8 boot_drive_override;   /* bootmenu.c: 0xFF = read MBR byte */
+extern u8 boot_drive_override;
 
-/* UEFI boot state, set by uefi_main before entering boot_main */
 static int uefi_mode;
 static int uefi_inst;
 
-/* 1 on UEFI boot (GOP text console); BIOS/VBE path otherwise. Used to
- * guard features that assume the legacy boot environment. */
 int uefi_active(void) { return uefi_mode; }
 
 static void kernel_early(void) {
     {
-        /* fixed heap clear of everything: kernel image ends below
-         * 0x60000 (asserted), installer snapshot ends below 0x70000,
-         * heap is 56KB at 0x70000, stack at 0x90000 */
         extern char __bss_end;
         ASSERT((u32)&__bss_end <= 0x60000u, "kernel too big for heap");
         if (heap_init(0x70000u, 0x7E000u))
             panic("heap init failed");
     }
-    irq_init();    /* IDT + PIC (IF still clear) */
-    timer_init();  /* PIT 100Hz + sti: interrupts live from here */
+    irq_init();
+    timer_init();
 }
 
 void uefi_main(void) {
     uefiparam_t *p = (uefiparam_t *)UEFIPARAM_ADDR;
     int gop_ok = 0;
-    vga_clear();   /* real VGA: harmless even if a GOP owns the screen */
+    vga_clear();
     serial_init();
     serial_print("BleeOS UEFI entry\n");
     kernel_early();
@@ -57,14 +53,14 @@ void uefi_main(void) {
     }
     if (!gop_ok)
         serial_print("uefi: no GOP framebuffer; serial log only\n");
-    boot_drive_override = 0xE0;   /* never a BIOS DL */
+    boot_drive_override = 0xE0;
     uefi_mode = 1;
     uefi_inst = (p->magic == UEFIPARAM_MAGIC && p->installed) ? 1 : 0;
     {
         extern void boot_main(void);
-        boot_main();   /* menu + kernel_main, all on the fbcon backend */
+        boot_main();
     }
-    for (;;) { cli(); hlt(); }   /* menu only returns via reboot/off */
+    for (;;) { cli(); hlt(); }
 }
 
 static int has_opt(const char *cmdline, const char *opt) {
@@ -112,8 +108,6 @@ void kernel_main(const boot_info_t *info) {
     }
     vga_print("Type `help` for commands, `exit` for boot menu.\n");
     {
-        /* installed = HDD boot (BIOS DL 0x80+) or UEFI-on-HD flag:
-         * the user DB then persists on reserved HDD sectors */
         int installed;
         if (uefi_mode)
             installed = uefi_inst;
@@ -150,11 +144,9 @@ void kernel_main(const boot_info_t *info) {
         serial_print(utoa10(ata_dbg_cyl[1], num));
         serial_print("\n");
     }
-    if (uefi_mode && !uefi_inst && users_try_restore() == 0) {
-        /* no BIOS drive byte under UEFI: adopt the on-disk DB when
-         * this media was installed (same sectors the BIOS path uses) */
+    if (uefi_mode && !uefi_inst && users_try_restore() == 0)
         vga_print("installed on HDD: users persist.\n");
-    }
+
     {
         /* USB HID is optional: PS/2 remains an independent fallback. */
         usb_scan();
@@ -171,6 +163,23 @@ void kernel_main(const boot_info_t *info) {
             vga_print("\n");
         }
     }
+
+    /* AMD display bring-up is independent of the GOP framebuffer.  It is
+     * detection-only for now, so a failed probe cannot take the GUI down. */
+    if (amd_display_init() == 0) {
+        char num[12];
+        vga_print("gpu: AMD Radeon PCI device 0x");
+        vga_print(utoa10((u32)amd_display_device(), num));
+        vga_print(amd_display_is_dcn21() ? " (DCN 2.1)\n" : " (display detected)\n");
+        if (amd_display_mmio()) {
+            vga_print("gpu: AMD display MMIO mapped at 0x");
+            vga_print(utoa10(amd_display_mmio(), num));
+            vga_print("\n");
+        }
+    } else {
+        vga_print("gpu: AMD display controller not found; keeping GOP/VBE\n");
+    }
+
     shell_run(info ? info->boot_sec : 0, verbose);
     vga_print("\nBack to boot menu...\n");
     sleep_ms(600);
