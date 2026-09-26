@@ -20,7 +20,7 @@ CFLAGS=-m32 -march=i386 -mno-mmx -mno-sse -mno-sse2 -ffreestanding -nostdlib -no
        -fno-builtin -fno-stack-protector -fno-pie -no-pie \
        -Wall -Wextra -O2 -std=gnu11
 
-OBJS=kernel_entry.o drivers.o bootmenu.o shell.o kernel.o vbe.o gfx.o mouse.o wm.o apps.o login.o ata.o users.o uhci.o usb.o tui.o pkg.o doom.o e1000.o net.o vt.o term.o irq.o irq_c.o heap.o pci.o fbcon.o hdimg.o
+OBJS=kernel_entry.o drivers.o bootmenu.o shell.o aap.o kernel.o vbe.o gfx.o mouse.o wm.o apps.o login.o ata.o users.o uhci.o usb.o tui.o pkg.o doom.o e1000.o net.o vt.o term.o irq.o irq_c.o heap.o pci.o fbcon.o hdimg.o
 # install blobs: boot.bin (MBR for HD targets) + BOOTX64.EFI (ESP for HD
 # targets), embedded as binary objects for the installer backend
 BOOTBINDS=bootbind.o loaderbind.o
@@ -41,8 +41,11 @@ drivers.o: drivers.c drivers.h usb.h
 bootmenu.o: bootmenu.c drivers.h boot.h
 	$(CC) $(CFLAGS) -c bootmenu.c -o bootmenu.o
 
-shell.o: shell.c shell.h drivers.h
+shell.o: shell.c shell.h drivers.h aap.h
 	$(CC) $(CFLAGS) -c shell.c -o shell.o
+
+aap.o: aap.c aap.h shell.h drivers.h
+	$(CC) $(CFLAGS) -c aap.c -o aap.o
 
 kernel.o: kernel.c drivers.h boot.h shell.h fbcon.h vbe.h uefiparam.h
 	$(CC) $(CFLAGS) -c kernel.c -o kernel.o
