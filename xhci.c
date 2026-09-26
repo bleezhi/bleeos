@@ -252,6 +252,10 @@ static int port_reset(int p,int*speed){
     return 0;
 }
 static int find_xhci(pci_dev_t*out){
+    /* Renoir/Cezanne/Barcelo USB 3.1 controllers use 1022:1639.
+     * Keep the class-code fallback so other xHCI controllers can work too. */
+    if (pci_find(0x1022,0x1639,out)==0)
+        return 0;
     return pci_find_class(0x0c0330,out);
 }
 int xhci_init(void){
