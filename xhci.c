@@ -144,8 +144,18 @@ static int event_wait(u32 type,u32 *slot,u32 *status,u32 timeout){
 static int command(u32 a,u32 b,u32 c,u32 d,u32 *slot){
     u32 status=0;
     cmd_put(a,b,c,d);
-    if(event_wait(TRB_COMPLETION,slot,&status,500))return -1;
-    return status==COMP_SUCCESS?0:-1;
+    if(event_wait(TRB_COMPLETION,slot,&status,500)){
+        status_err("command completion timeout");
+        return -1;
+    }
+    if(status!=COMP_SUCCESS){
+        char b[12];
+        klog("[ ERR ] xHCI: command completion code=");
+        klog(utoa10(status,b));
+        klog("\n");
+        return -1;
+    }
+    return 0;
 }
 
 static void ctx32_unused(u8 *base,int idx,u32 a,u32 b,u32 c,u32 d,u32 e){
