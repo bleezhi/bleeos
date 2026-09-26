@@ -316,7 +316,7 @@ int wm_init(void) {
     for (int i = 0; i < MAXWIN; i++) wins[i].used = 0;
     norder = 0; dragging = 0; quit = 0; dirty = 1;
     mx = gfx_w() / 2; my = gfx_h() / 2; mbtn = 0;
-    if (mouse_init()) { vbe_disable(); return 2; }
+    (void)mouse_init();
     return 0;
 }
 
