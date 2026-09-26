@@ -29,7 +29,7 @@ all: os.img
 
 boot.bin: boot.asm
 	$(AS) -f bin boot.asm -o boot.bin
-	@od -A n -t x1 -v boot.bin | tr -d ' \\n' | grep -q '88163b7d' || \\
+	@od -A n -t x1 -v boot.bin | tr -d ' \n' | grep -q '88163b7d' || \
 		(echo "ERROR: boot_drive moved from 0x7D3B; update bootmenu.c"; exit 1)
 
 kernel_entry.o: kernel_entry.asm
