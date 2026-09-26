@@ -1,1 +1,7 @@
-ASCII Animation Program (aap) is a animation program for bleeShell (opened in gui, i forgot)
+aap - ASCII animation player for BleeOS
+
+Run:
+  run /pkg/aap/aap.sh
+
+The program draws eight frames using clear, printf and sleep to create
+a small animated ASCII character in the BleeOS shell.
