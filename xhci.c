@@ -44,6 +44,7 @@ typedef unsigned long long u64;
 #define TRB_ENABLE_SLOT TRB_TYPE(9)
 #define TRB_ADDR_DEV TRB_TYPE(11)
 #define TRB_CONFIG_EP TRB_TYPE(12)
+#define TRB_EVAL_CONTEXT TRB_TYPE(13)
 #define TRB_SETUP TRB_TYPE(2)
 #define TRB_DATA TRB_TYPE(3)
 #define TRB_STATUS TRB_TYPE(4)
@@ -153,12 +154,6 @@ static void ep_ring_reset(int index){
     for(int i=0;i<32;i++)trb_clear(&ctrl_rings[index][i]);
     make_link(ctrl_rings[index]);
 }
-static void ep_put_unused(u32 a,u32 b,u32 c,u32 flags){
-    trb_t *t=&ep_ring[devs[0].ep_i];
-    t->a=a;t->b=b;t->c=c;t->d=flags|((u32)devs[0].ep_cycle);
-    devs[0].ep_i++;
-    if(devs[0].ep_i==31){devs[0].ep_i=0;devs[0].ep_cycle^=1;}
-}
 static int xfer_wait(u32 slot,u32 *actual){
     u32 status=0;
     int r=event_wait(TRB_TRANSFER,0,&status,100);
@@ -172,13 +167,13 @@ static int control_x(xdev_t *d,const u8 setup[8],void *buf,int len,int in){
     u64 bp=ptr64(buf);
     int i=d->ep_i, cyc=d->ep_cycle;
     u32 trt=in?TRB_TRT_IN:(len?TRB_TRT_OUT:0);
-    t=&ep_ring[i];t->a=(u32)ptr64(setup);t->b=0;t->c=8;t->d=TRB_SETUP|TRB_IDT|TRB_CHAIN|trt|(u32)cyc;
+    t=&ctrl_rings[d->index][i];t->a=(u32)ptr64(setup);t->b=0;t->c=8;t->d=TRB_SETUP|TRB_IDT|TRB_CHAIN|trt|(u32)cyc;
     i++;
     if(len){
-        t=&ep_ring[i];t->a=(u32)bp;t->b=(u32)(bp>>32);t->c=(u32)len;
+        t=&ctrl_rings[d->index][i];t->a=(u32)bp;t->b=(u32)(bp>>32);t->c=(u32)len;
         t->d=TRB_DATA|(in?TRB_DIR_IN:0)|TRB_CHAIN|(u32)cyc;i++;
     }
-    t=&ep_ring[i];t->a=t->b=0;t->c=0;
+    t=&ctrl_rings[d->index][i];t->a=t->b=0;t->c=0;
     t->d=TRB_STATUS|(!in?TRB_DIR_IN:0)|TRB_IOC|(u32)cyc;
     i++;
     d->ep_i=i;if(i==31){d->ep_i=0;d->ep_cycle^=1;}
@@ -231,9 +226,10 @@ static int configure_ep(xdev_t*d,u8 epnum,u8 mps,u8 interval){
     e0[0]=3u<<16;e0[1]=(4u<<3)|((u32)d->mps<<16);
     e0[2]=(u32)ptr64(ctrl_rings[d->index])|1;e0[3]=(u32)(ptr64(ctrl_rings[d->index])>>32);e0[4]=8;
     u32 *ep=ctx(in_ctx,epnum);
+    trb_t *ring=(epnum&1)?kbd_rings[d->index]:mouse_rings[d->index];
     ep[0]=(3u<<1)|((u32)interval<<16);
     ep[1]=(((epnum&1)?7u:3u)<<3)|((u32)mps<<16);
-    ep[2]=(u32)ptr64(ep_ring)|1;ep[3]=(u32)(ptr64(ep_ring)>>32);
+    ep[2]=(u32)ptr64(ring)|1;ep[3]=(u32)(ptr64(ring)>>32);
     ep[4]=8;
     return command((u32)ptr64(in_ctx),(u32)(ptr64(in_ctx)>>32),0,
                    TRB_CONFIG_EP|((u32)d->slot<<24),0);
@@ -357,7 +353,7 @@ int xhci_enumerate_port(int p,int index){
     if(setcfg(x,(u8)config))return -1;
     if(setproto(x,(u8)ifnum))return -1;
     if(kep){if(configure_ep(x,(u8)(kep*2+1),kmps,10))return -1;x->kbd_ep=kep;x->kbd_mps=kmps;}
-    if(mep){if(configure_ep(x,(u8)(mep*2),mmps,10))return -1;x->mouse_ep=mep;x->mouse_mps=mmps;}
+    if(mep){if(configure_ep(x,(u8)(mep*2+1),mmps,10))return -1;x->mouse_ep=mep;x->mouse_mps=mmps;}
     if(index>=ndev)ndev=index+1;
     return 0;
 }
@@ -390,7 +386,7 @@ int xhci_hid_trykey(int index,int *out){
         if(k==0x4a){*out=0x104;return 0;}if(k==0x4d){*out=0x105;return 0;}if(k==0x4c){*out=0x106;return 0;}
         char ch=0;if(k>=4&&k<=29){static const char*lo="abcdefghijklmnopqrstuvwxyz";static const char*hi="ABCDEFGHIJKLMNOPQRSTUVWXYZ";ch=(x->mod&3)?hi[k-4]:lo[k-4];}
         else if(k>=0x1e&&k<=0x27){static const char*n="1234567890";static const char*q="!@#$%^&*()";ch=(x->mod&3)?q[k-0x1e]:n[k-0x1e];}
-        else switch(k){case 0x28:ch='\\n';break;case 0x2c:ch=' ';break;case 0x2a:ch='\\b';break;case 0x2b:ch='\\t';break;case 0x2d:ch=(x->mod&3)?'_':'-';break;case 0x2e:ch=(x->mod&3)?'+':'=';break;case 0x2f:ch=(x->mod&3)?'{':'[';break;case 0x30:ch=(x->mod&3)?'}':']';break;default:break;}
+        else switch(k){case 0x28:ch='\n';break;case 0x2c:ch=' ';break;case 0x2a:ch='\b';break;case 0x2b:ch='\t';break;case 0x2d:ch=(x->mod&3)?'_':'-';break;case 0x2e:ch=(x->mod&3)?'+':'=';break;case 0x2f:ch=(x->mod&3)?'{':'[';break;case 0x30:ch=(x->mod&3)?'}':']';break;default:break;}
         if(ch){*out=(u8)ch;return 0;}}
     for(int i=0;i<6;i++)if(!r[2+i])x->prev[i]=0;return -1;
 }
