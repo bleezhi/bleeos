@@ -4,6 +4,7 @@
 #include "xhci.h"
 #include "pci.h"
 #include "drivers.h"
+typedef unsigned long long u64;
 
 #define XCAP_CAPL 0x00
 #define XCAP_HCSP1 0x04
@@ -57,7 +58,7 @@ typedef struct { u32 a,b,c,d; } trb_t;
 
 static volatile u8 *mmio;
 static u32 op, db, rt;
-static int ready, maxports, maxslots;
+static int ready, maxports, maxslots, ctx_size=32;
 static int cmd_i, cmd_cycle=1;
 static int ev_i, ev_cycle=1;
 static u32 ev_dequeue;
@@ -90,6 +91,7 @@ static inline u32 rr(u32 o){ return *(volatile u32 *)(mmio+o); }
 static inline void rw(u32 o,u32 v){ *(volatile u32 *)(mmio+o)=v; }
 static void zero(void *p,u32 n){u8 *q=p;while(n--)*q++=0;}
 static u64 ptr64(const void *p){return (u64)(u32)p;}
+static u32 *ctx(u8 *base,int idx){return (u32 *)(base+idx*ctx_size);}
 
 static int wait32(u32 off,u32 mask,u32 want,u32 loops){
     while(loops--) if((rr(off)&mask)==want) return 0;
@@ -205,7 +207,7 @@ static int address_device(xdev_t*d){
     u32 *ic=(u32 *)in_ctx;
     zero(in_ctx,2048);
     ic[1]=(1u<<0)|(1u<<1);
-    u32 *sc=ic+8, *ep=ic+16;
+    u32 *sc=ctx(in_ctx,1), *ep=ctx(in_ctx,2);
     sc[0]=((u32)d->speed<<20)|(1u<<27);
     sc[1]=(u32)d->port<<16;
     ep[0]=(3u<<16); /* interval 0, CErr=3 */
@@ -223,14 +225,13 @@ static int configure_ep(xdev_t*d,u8 epnum,u8 mps,u8 interval){
     zero(in_ctx,2048);
     u32 *ic=(u32 *)in_ctx;
     ic[1]=(1u<<0)|(1u<<1)|(1u<<epnum);
-    u32 *sc=ic+8;
+    u32 *sc=ctx(in_ctx,1);
     sc[0]=((u32)d->speed<<20)|(1u<<27);
     sc[1]=(u32)d->port<<16;
-    u32 *e0=ic+16;
+    u32 *e0=ctx(in_ctx,2);
     e0[0]=3u<<16;e0[1]=(4u<<3)|((u32)d->mps<<16);
     e0[2]=(u32)ptr64(ep_ring)|1;e0[3]=(u32)(ptr64(ep_ring)>>32);e0[4]=8;
-    u32 *ep=ic+8+epnum*8;
-    u32 dir=epnum&1;
+    u32 *ep=ctx(in_ctx,epnum);
     ep[0]=((u32)interval<<16);
     ep[1]=(((epnum&1)?7u:3u)<<3)|((u32)mps<<16);
     ep[2]=(u32)ptr64(ep_ring)|1;ep[3]=(u32)(ptr64(ep_ring)>>32);
@@ -254,7 +255,7 @@ static int find_xhci(pci_dev_t*out){
     return pci_find_class(0x0c0330,out);
 }
 int xhci_init(void){
-    pci_dev_t d;u32 bar,cap,off,hcc,slots,ports;
+    pci_dev_t d;u32 bar,cap,hcc,slots,ports;
     if(ready)return 0;
     ndev=0;
     if(find_xhci(&d))return -1;
@@ -262,9 +263,10 @@ int xhci_init(void){
     if(!(bar&1)&&((bar&6)==4) && d.bars[1]) return -1; /* 64-bit BAR above 32-bit address space */
     bar=pci_bar_addr(&d,0);if(!bar)return -1;
     pci_set_cmd(&d,0x06);
-    mmio=(volatile u8 *)(uintptr_t)bar;
+    mmio=(volatile u8 *)(u32)bar;
     cap=mmio[0];op=cap;
     hcc=*(volatile u32 *)(mmio+XCAP_HCC1);
+    ctx_size=(hcc&(1u<<2))?64:32;
     slots=*(volatile u32 *)(mmio+XCAP_HCSP1)&0xff;
     ports=(*(volatile u32 *)(mmio+XCAP_HCSP1)>>24)&0xff;
     maxslots=slots>8?8:(int)slots;maxports=ports>8?8:(int)ports;
@@ -331,7 +333,7 @@ int xhci_enumerate_port(int p,int index){
     x->mps=d[7]?d[7]:x->mps;
     /* Re-addressing isn't necessary; update EP0 MPS through Evaluate Context. */
     zero(in_ctx,2048);u32 *ic=(u32*)in_ctx;ic[1]=1u<<1;
-    u32 *e0=ic+16;e0[1]=(4u<<3)|((u32)x->mps<<16);
+    u32 *e0=ctx(in_ctx,2);e0[1]=(4u<<3)|((u32)x->mps<<16);
     if(command((u32)ptr64(in_ctx),(u32)(ptr64(in_ctx)>>32),0,
                TRB_EVAL_CONTEXT|((u32)slot<<24),0))return -1;
     if(getdesc(x,2,cfg,9))return -1;
