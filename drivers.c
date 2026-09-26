@@ -1,5 +1,6 @@
 /* BleeOS drivers implementation. */
 #include "drivers.h"
+#include "usb.h"
 
 /* ================= VGA ================= */
 #define VGA_BUF ((volatile u16*)0xB8000)
@@ -110,6 +111,8 @@ static const char sc_shift[58] = {
 static int shift_on, caps_on, ctrl_on;
 
 int kbd_trykey(void) {
+    int usb_key = usb_hid_trykey();
+    if (usb_key != -1) return usb_key;
     static int ext = 0;
     u8 st = inb(0x64);
     if (!(st & 0x01)) return -1;
