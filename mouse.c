@@ -1,6 +1,7 @@
 /* PS/2 mouse: polled 3-byte packets. Shares port 0x60 with the
  * keyboard; the kbd driver ignores AUX-flagged bytes (status bit 5). */
 #include "mouse.h"
+#include "usb.h"
 
 static int mouse_tryinit(void);
 
@@ -109,6 +110,7 @@ int mouse_pending(void) {
 }
 
 int mouse_poll(int *dx, int *dy, int *btn) {
+    if (usb_hid_mouse_poll(dx, dy, btn)) return 1;
     u8 st = inb(0x64);
     if (!(st & 0x01) || !(st & 0x20)) return 0;   /* no mouse byte */
     u8 b = inb(0x60);
