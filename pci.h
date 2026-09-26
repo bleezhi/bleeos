@@ -6,7 +6,7 @@
 
 #include "drivers.h"
 
-#define PCI_MAXDEV 16
+#define PCI_MAXDEV 128
 
 typedef struct {
     u8 bus, slot, func;
@@ -16,7 +16,7 @@ typedef struct {
     u32 bars[6];      /* raw BAR values */
 } pci_dev_t;
 
-/* scan bus 0 (multifunction aware); returns device count */
+/* scan the PCI domain's 8-bit bus range (multifunction aware); returns device count */
 int pci_scan(void);
 int pci_ndev(void);
 const pci_dev_t *pci_dev(int i);
