@@ -92,8 +92,7 @@ static u8 kbuf[2][8], mbuf[2][4];
 static int k_pending[2], m_pending[2];
 
 static inline u32 rr(u32 o){ return *(volatile u32 *)(mmio+o); }
-static inline void rw(u32 o,u32 v){ *(volatile u32 *)(mmio+o)=v; }
-static void zero(void *p,u32 n){u8 *q=p;while(n--)*q++=0;}
+static inline void rw(u32 o,u32 v){ *(volatile u32 *)(mmio+o)=v; }\nstatic inline void rw64(u32 o,u64 v){ rw(o,(u32)v); rw(o+4,(u32)(v>>32)); }\nstatic void zero(void *p,u32 n){u8 *q=p;while(n--)*q++=0;}
 static u64 ptr64(const void *p){return (u64)(u32)p;}
 static u32 *ctx(u8 *base,int idx){return (u32 *)(base+idx*ctx_size);}
 
@@ -167,8 +166,22 @@ static void ep_ring_reset(int index){
 }
 static int xfer_wait(u32 slot,u32 *actual){
     u32 status=0;
-    int r=event_wait(TRB_TRANSFER,0,&status,100);
-    if(r)return -1;
+    while(1){
+        trb_t *e=&event_ring[ev_i];
+        if((e->d&1u)!=((u32)ev_cycle)){ sleep_ms(1); if(!slot) return -1; continue; }
+        u32 et=(e->d>>10)&63;
+        u32 sl=e->d>>24;
+        u32 epid=(e->d>>16)&31;
+        if(et!=TRB_TRANSFER || sl!=slot || epid!=1){
+            ev_i++; if(ev_i==64){ev_i=0;ev_cycle^=1;}
+            ev_dequeue=(u32)ptr64(&event_ring[ev_i]); rw(rt+0x38,ev_dequeue|8);
+            continue;
+        }
+        status=(e->c>>24)&255;
+        ev_i++; if(ev_i==64){ev_i=0;ev_cycle^=1;}
+        ev_dequeue=(u32)ptr64(&event_ring[ev_i]); rw(rt+0x38,ev_dequeue|8);
+        break;
+    }
     if(actual)*actual=0;
     return (status==COMP_SUCCESS||status==COMP_SHORT)?0:-1;
 }
@@ -259,6 +272,7 @@ static int port_reset(int p,int*speed){
     for(int i=0;i<100;i++){sleep_ms(1);v=*ps;if(v&PORT_PRC)break;}
     if(!(v&PORT_PRC))return -1;
     *ps=v|PORT_PRC;
+    v=*ps;
     if(speed)*speed=PORT_SPEED(v);
     return 0;
 }
@@ -326,12 +340,14 @@ int xhci_init(void){
     if(wait32(op+XOP_STS,STS_CNR,0,100000))return -1;
     ring_init();zero(dcbaa,sizeof(dcbaa));zero(out_ctx,sizeof(out_ctx));
     if(sp_count)dcbaa[0]=ptr64(sp_table);
-    rw(op+XOP_DCBAAP,(u32)ptr64(dcbaa));
-    rw(op+XOP_CRCR,(u32)ptr64(cmd_ring)|1);
+    rw64(op+XOP_DCBAAP,ptr64(dcbaa));
+    rw64(op+XOP_CRCR,ptr64(cmd_ring)|1);
     rw(op+XOP_CONFIG,(u32)maxslots);
     erst[0]=(u64)ptr64(event_ring);erst[1]=64;
     rw(rt+0x28,1);
-    rw(rt+0x30,(u32)ptr64(erst));
+    rw64(rt+0x30,ptr64(erst));
+    ev_dequeue=(u32)ptr64(event_ring);
+    rw64(rt+0x38,ptr64(event_ring)|8);
     rw(rt+0x20,0); /* interrupter disabled; we poll the event ring */
     rw(op+XOP_CMD,rr(op+XOP_CMD)|CMD_RS);
     if(wait32(op+XOP_STS,STS_HCH,0,100000))return -1;
@@ -350,7 +366,11 @@ int xhci_enumerate_port(int p,int index){
     u8 kep=0,mep=0,kmps=8,mmps=4;
     if(index<0||index>=2||!port_reset(p,&speed))return -1;
     /* Only USB 1.x/2.0 device speeds for this first xHCI HID backend. */
-    if(speed==0||speed>3)return -1;
+    /* xHCI speed IDs: 1 low, 2 full, 3 high, 4 super, 5+ newer.
+     * This HID backend currently only has USB2 boot-protocol descriptors,
+     * but do not reject a SuperSpeed port before reporting it. */
+    if(speed==0||speed>15)return -1;
+    if(speed>3)return -1;
     ep_ring_reset(index);
     for(int z=0;z<32;z++){trb_clear(&kbd_rings[index][z]);trb_clear(&mouse_rings[index][z]);}
     make_link(kbd_rings[index]);make_link(mouse_rings[index]);
