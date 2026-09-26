@@ -36,10 +36,19 @@ static int ata_wait(int want_drq) {
     return -1;
 }
 
+static ata_dev_t devs[2];
+static int probed;
+
+/* IDENTIFY failure diagnostics per drive (serial, on probe failure) */
+u8 ata_dbg_step[2];
+u8 ata_dbg_status[2];
+u8 ata_dbg_cyl[2];
+
 static int ata_select(int sel) {
     outb(P_DRIVE, (u8)(0xE0 | (sel << 4)));
     ata_delay();
     u8 st = inb(P_STAT);
+    ata_dbg_status[sel] = st;
     if (st == 0xFF || st == 0x00) return -1;
     return 0;
 }
@@ -50,13 +59,20 @@ static int probed;
 static int ata_identify(int sel, ata_dev_t *d) {
     u16 buf[256];
     d->present = 0; d->slave = sel;
-    if (ata_select(sel)) return -1;
+    if (ata_select(sel)) { ata_dbg_step[sel] = 1; return -1; }
     outb(P_CMD, 0xEC);                  /* IDENTIFY */
     ata_delay();
-    if (inb(P_STAT) == 0) return -1;
-    /* ATAPI answers with a cylinder signature instead of data */
-    if (inb(P_LBA1) != 0 || inb(P_LBA2) != 0) return -1;
-    if (ata_wait(1)) return -1;
+    ata_dbg_status[sel] = inb(P_STAT);
+    if (ata_dbg_status[sel] == 0) { ata_dbg_step[sel] = 2; return -1; }
+    ata_dbg_cyl[sel] = inb(P_LBA1) | inb(P_LBA2);
+    if (ata_wait(1)) { ata_dbg_step[sel] = 4; return -1; }
+    /* NOTE: no cylinder-signature ATAPI check. A real ATAPI device
+     * aborts IDENTIFY with ERR set (rejected by ata_wait above) plus
+     * 0x14/0xEB. QEMU leaves stale LBA bits in the cylinder registers
+     * after a successful IDENTIFY (whatever the firmware read last),
+     * so nonzero cylinders with DRDY+DSC+DRQ and no ERR are a valid
+     * ATA disk. (An absent slave can mirror the master here; nothing
+     * addresses drive 1, so a phantom slave entry is harmless.) */
     for (int i = 0; i < 256; i++) buf[i] = inw(P_DATA);
     for (int i = 0; i < 40; i++) {
         d->model[i] = (char)(buf[27 + i / 2] >> (8 * (1 - (i & 1))));

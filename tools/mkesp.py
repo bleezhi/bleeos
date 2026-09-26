@@ -14,6 +14,10 @@ import sys
 SECTOR = 512
 TOTAL_SECTORS = 65536          # 32MB FAT volume
 PART_START = 2048              # LBA of the ESP inside the MBR wrapper
+# KERNEL.BIN is padded to the full stage2 size so the ESP carries the
+# exact bytes the installer snapshots from RAM (== hdimg.c KERNEL.BIN).
+# Keep in sync with STAGE2_SECTORS (Makefile/boot.asm/hdimg.h).
+STAGE2_SECTORS = 288
 SECTORS_PER_CLUSTER = 4        # 2KB clusters
 RESERVED = 8
 FATS = 2
@@ -176,6 +180,9 @@ def main():
         loader = f.read()
     with open(sys.argv[2], "rb") as f:
         kernel = f.read()
+    if len(kernel) > STAGE2_SECTORS * SECTOR:
+        sys.exit("kernel.bin exceeds stage2 (%d sectors)" % STAGE2_SECTORS)
+    kernel = kernel.ljust(STAGE2_SECTORS * SECTOR, b"\x00")
     vol = build([
         (("EFI", "BOOT", "BOOTX64.EFI"), loader),
         (("KERNEL.BIN",), kernel),

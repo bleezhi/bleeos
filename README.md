@@ -40,14 +40,19 @@ Boot flow: `boot.asm` (16-bit ASM MBR) → `kernel_entry.asm` (ASM: A20, GDT,
 ATA PIO driver (primary bus, LBA28, polled). The kernel reports a
 detected primary master at boot; `install` is a Debian-like TUI
 wizard (root only): welcome, hostname, root password, optional
-user, disk confirm, progress bar, reboot. It writes boot sector +
-kernel (257 sectors) to LBA 0, verifies, then flushes hostname +
-users to the user DB so the installed system boots with them.
-Dialogs are modal boxes (blue screen, gray box, shadow, red
-title, red buttons); errors use the same style (no-disk offers
-Reboot). Tested end-to-end (screenshots): error dialog +
-reboot, every wizard dialog, completion, HDD boot, login as the
-wizard-created user.
+user, disk confirm, progress bar, reboot. It writes a universal
+image to the disk and verifies it: BIOS MBR + stage2 (288 sectors)
+plus a UEFI ESP (FAT16 with `BOOTX64.EFI` + kernel, built by
+`hdimg.c` — byte-identical to `tools/mkesp.py` output, checked by
+`tools/test_hdimg.sh`), so the disk boots on BIOS and UEFI alike.
+Works from both BIOS and UEFI boot (payload comes from blobs
+embedded in the kernel plus a frozen RAM snapshot — no source-disk
+detection). Hostname + users are flushed to the user DB after the
+verify. Needs a disk ≥ 67584 sectors (33 MB). Dialogs are modal
+boxes (blue screen, gray box, shadow, red title, red buttons);
+errors use the same style (no-disk offers Reboot). Tested
+end-to-end: BIOS install → BIOS boot, and UEFI install → UEFI
+boot, login as the wizard-created user, users persist.
 
 ## Users (TUI login + database)
 Boot drops to a `hostname login:` prompt checked against
@@ -60,9 +65,10 @@ ramfs is volatile, except on HDD installs (see below): added users
 vanish on reboot when booted from floppy/CD.
 
 ## Users persist when installed
-Booting from hard disk (BIOS drive 0x80+) sets installed mode
+Booting from hard disk (BIOS drive 0x80+, or a valid on-disk DB
+probed at UEFI boot) sets installed mode
 (`installed on HDD: users persist.` at boot) and the DB is kept on
-reserved HDD sectors (LBA 256..260, magic + checksums, past the OS
+reserved HDD sectors (LBA 289..293, magic + checksums, past the OS
 image): loaded into ramfs at boot, written back on every add/del/
 passwd/seed. Verified: useradd alice on HDD, reboot, alice logs in
 with an identical users list. The install drive is detected from
@@ -92,11 +98,13 @@ user-mode networking; `ping 10.0.2.2` answers. No DHCP/DNS/TCP yet.
 
 ## Kernel core (IDT, timer, heap, PCI)
 Interrupts are on: 8259 PIC remapped (IRQs at 32..47), PIT at
-100Hz driving a tick counter, heap allocator (64KB arena,
-`mem` shows stats), and a PCI bus layer (table, BARs, IRQ lines)
-used by new code (UHCI stub migrated; e1000 predates it).
+100Hz driving a tick counter, heap allocator (56KB arena at
+0x70000, `mem` shows stats), and a PCI bus layer (table, BARs, IRQ
+lines) used by new code (UHCI stub migrated; e1000 predates it).
 Keyboard/mouse stay masked + polled; `sleep_ms` halts on ticks
-when interrupts are live, busy-waits during early boot.
+when interrupts are live, busy-waits during early boot, and falls
+back to busy-poll if the PIT runs but ticks stall (PIC-less
+hardware would otherwise `hlt` forever).
 
 ## ISO (`make iso`, `make run-cd`)
 `bleeos.iso` is built with El Torito floppy emulation (`boot.img` =
@@ -111,18 +119,35 @@ in `uefi/efi.h`, PE32+ linked with GNU `ld -mi386pep`) plus the same
 flat `kernel.bin` live on a FAT16 ESP built by `tools/mkesp.py`
 (MBR wrapper, 0x0E partition — partitionless superfloppies don't
 boot on OVMF). The loader reads the kernel to its link address
-`0x7E00`, records the GOP framebuffer in `uefiparam_t` at `0x7000`,
-exits boot services, drops long mode → 32-bit protected mode
-(`uefi/tramp.S`, run from low RAM), and jumps to `uefi_entry`.
-The kernel runs the same menu/shell on a GOP text console
-(`fbcon.h/.c`: 8x8 blits, `vga_backend` so shell/login/TUI run
-unmodified) and the desktop at the native GOP mode (`vbe_uefi_init`
-adopts the GOP instead of programming VBE; `gfx_init_pitch` handles
-pitch != width). `install` refuses on UEFI boot (no MBR image in
-RAM to snapshot). Tested end-to-end under OVMF (`-bios
-OVMF.4m.fd`): auto-boot to login, root shell, `mem`, `gui`
-desktop at 1280x800x32. Requires `qemu-system-x86_64` and OVMF
+`0x7E00`, picks the largest 32-bit direct-color GOP mode within
+1920x1200 via `QueryMode`/`SetMode` (firmware default is often
+low-res; BGR preferred, falls back to the current mode), records
+the framebuffer in `uefiparam_t` at `0x7000`, exits boot services,
+drops long mode → 32-bit protected mode (`uefi/tramp.S`, run from
+low RAM), and jumps to `uefi_entry` (fixed address `0x8000`, so the
+loader needs no `nm` — and the kernel embeds the loader for
+`install`, see above). The kernel runs the same menu/shell on a
+GOP text console (`fbcon.h/.c`: 8x8 blits, `vga_backend` so
+shell/login/TUI run unmodified) and the desktop at the set GOP
+mode (`vbe_uefi_init` adopts the GOP instead of programming VBE;
+`gfx_init_pitch` handles pitch != width). Tested end-to-end under
+OVMF (`-bios OVMF.4m.fd`): auto-boot to login, root shell, `mem`,
+`gui` desktop at 1280x800x32 and 1920x1200x32. Requires
+`qemu-system-x86_64` and OVMF
 (`/usr/share/edk2-ovmf/x64/OVMF.4m.fd`, overridable via `OVMF=`).
+
+## Real hardware (notes, mostly untested)
+Display is the easy part: on UEFI machines GOP already drives
+eDP panels and HDMI monitors — firmware initializes the outputs
+and BleeOS just uses (and now sets) the framebuffer. Known gaps
+toward physical laptops, hardest first: USB HID keyboard/mouse
+(no PS/2 on modern machines; needs an xHCI driver — only a UHCI
+detection stub exists), AHCI/NVMe storage (no legacy IDE ports;
+installer and user persistence need it), APIC/HPET timers (PIT
+often remains; the tick-stall fallback above covers PIC-less
+hangs), ACPI poweroff (reboot has PCI-reset fallback), and picky
+firmware that wants a 0xEF/GPT ESP instead of the 0x0E MBR
+partition the installer writes.
 
 ## Packages (`pkg`, `run`, website)
 Offline package manager: `.blee` archives (magic `BLEEPKG1`, name,

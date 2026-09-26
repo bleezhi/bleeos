@@ -198,6 +198,14 @@ typedef struct {
     u32 PixelReserved;
     u32 PixelsPerScanLine;
 } EFI_GRAPHICS_OUTPUT_MODE_INFORMATION;
+/* PixelFormat: 0 RGBReserved8, 1 BGRReserved8 (both 32bpp direct
+ * color), 2 BitMask, 3 BltOnly (no direct framebuffer) */
+struct EFI_GRAPHICS_OUTPUT_PROTOCOL;
+typedef EFI_STATUS (EFIAPI *EFI_GOP_QUERY_MODE)(
+    struct EFI_GRAPHICS_OUTPUT_PROTOCOL *This, u32 ModeNumber,
+    UINTN *SizeOfInfo, EFI_GRAPHICS_OUTPUT_MODE_INFORMATION **Info);
+typedef EFI_STATUS (EFIAPI *EFI_GOP_SET_MODE)(
+    struct EFI_GRAPHICS_OUTPUT_PROTOCOL *This, u32 ModeNumber);
 typedef struct {
     u32 MaxMode;
     u32 Mode;
@@ -206,9 +214,9 @@ typedef struct {
     u64 FrameBufferBase;
     UINTN FrameBufferSize;
 } EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE;
-typedef struct {
-    void *QueryMode;
-    void *SetMode;
+typedef struct EFI_GRAPHICS_OUTPUT_PROTOCOL {
+    EFI_GOP_QUERY_MODE QueryMode;
+    EFI_GOP_SET_MODE SetMode;
     void *Blt;
     EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE *Mode;
 } EFI_GRAPHICS_OUTPUT_PROTOCOL;

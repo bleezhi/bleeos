@@ -933,10 +933,10 @@ static const char MAN_INSTALL[] =
     "install - Debian-like OS installer (TUI)\nUsage: install\n"
     "Stepped wizard (root only): welcome, hostname, root\n"
     "password, optional user, disk confirm, progress bar.\n"
-    "Writes boot sector + kernel (257 sectors) to LBA 0 of\n"
-    "the ATA primary master and verifies. Hostname, users\n"
-    "and passwords persist on installed systems.\n"
-    "BIOS boot only (unavailable on UEFI boot).\n";
+    "Writes a universal image to the ATA primary master:\n"
+    "BIOS MBR + stage2 and a UEFI ESP (BOOTX64.EFI +\n"
+    "kernel), so the disk boots on BIOS and UEFI.\n"
+    "Hostname, users and passwords persist on it.\n";
 static const char MAN_USERS[] =
     "users - login accounts\n"
     "TUI login at boot checks /etc/passwd + /etc/shadow\n"
@@ -975,7 +975,7 @@ static const char MAN_PKG[] =
     "Run installed scripts with `run /pkg/<name>/...`.\n";
 static const char MAN_MEM[] =
     "mem - heap statistics\nUsage: mem\n"
-    "Shows the kernel heap arena (56KB at 0x62000): total,\n"
+    "Shows the kernel heap arena (56KB at 0x70000): total,\n"
     "used, free and block count.\n";
 static const char MAN_SHELL[] =
     "Shell syntax: ' \" quotes, \\ escape, $VAR $? $$,\n"
@@ -1124,27 +1124,19 @@ static int b_gui(int argc, char **argv, const char *in) {    (void)argc; (void)a
     return 0;
 }
 
-/* installer image: MBR + stage2 as loaded by the bootloader, still
- * intact in RAM (nothing reuses 0x7C00+ after boot) */
-#define INSTALL_SRC ((const u8 *)0x7C00u)
-#define INSTALL_SECTORS 257   /* 1 MBR + STAGE2_SECTORS (see Makefile) */
-/* snapshot area: free RAM above the kernel, below the stack.
- * (Was 0x30000; the kernel's .bss grew past it and the snapshot
- * trashed cap_active/devs/etc. Guarded below against recurrence.) */
-#define INSTALL_SNAP ((u8 *)0x40000u)
-#define INSTALL_SNAP_END ((u8 *)0x60200u)   /* +257 sectors, worst case */
+/* install image: universal HD layout (hdimg.h) rendered sector by
+ * sector from embedded blobs + the live stage2 in RAM. No big
+ * snapshot buffer: a 16KB .bss chunk streams write+verify. */
+#include "hdimg.h"
+#define INSTALL_CHUNK_SEC 32u
+static u8 inst_chunk[INSTALL_CHUNK_SEC * 512u];
+
+extern u8 _binary_boot_bin_start[];
+extern u8 _binary_boot_bin_end[];
 
 static int b_install(int argc, char **argv, const char *in) {
     (void)argc; (void)argv; (void)in;
     ata_dev_t d;
-    if (uefi_active()) {
-        /* UEFI boot has no MBR/stage2 image at 0x7C00 to snapshot,
-         * so there is nothing trustworthy to write. */
-        tui_msg("Error", "install: not supported on UEFI boot;\n"
-                "boot the floppy/USB image (BIOS) to install");
-        vga_clear();
-        return 1;
-    }
     if (sh_in_term()) {
         sh_eprint("install: use the text console (needs full 80 cols)\n");
         return 1;
@@ -1164,14 +1156,19 @@ static int b_install(int argc, char **argv, const char *in) {
         vga_clear();
         return 1;
     }
-    if (d.sectors < INSTALL_SECTORS) {
-        tui_msg("Error", "install: disk too small (need 257 sectors)");
+    if (d.sectors < hdimg_sectors()) {
+        tui_msg("Error", "install: disk too small (need 67584\n"
+                "sectors = 33 MB)");
         vga_clear();
         return 1;
     }
-    if (INSTALL_SRC[510] != 0x55 || INSTALL_SRC[511] != 0xAA) {
+    /* install payload sanity: embedded MBR signature + live stage2
+     * prologue (both boot modes run the image they install) */
+    if (_binary_boot_bin_start[510] != 0x55 ||
+        _binary_boot_bin_start[511] != 0xAA ||
+        *(volatile const u8 *)0x7E00u != 0xFA) {
         tui_msg("Error", "install: boot image not intact in RAM;\n"
-                "reboot from floppy and retry");
+                "reboot and retry");
         vga_clear();
         return 1;
     }
@@ -1278,48 +1275,61 @@ static int b_install(int argc, char **argv, const char *in) {
             return 1;
         }
     }
-    /* 6. write + verify with progress */
+    /* 6. write + verify with progress (streamed 32-sector chunks:
+     * universal image boots on BIOS and UEFI alike) */
     tui_progress("Installing", "Writing system...");
     {
+        /* freeze the live stage2: bss/data mutate, so the write and
+         * verify passes must render from a snapshot, not live RAM */
         extern char __bss_end;
-        if ((u32)INSTALL_SNAP < (u32)&__bss_end ||
-            (u32)INSTALL_SNAP_END >= 0x90000u) {
-            tui_msg("Error", "scratch overlaps kernel/stack");
+        u8 *snap = (u8 *)(((u32)&__bss_end + 0xFFFu) & ~0xFFFu);
+        if (snap + (u32)STAGE2_SECTORS * 512u >= (u8 *)0x70000u) {
+            tui_msg("Error", "image too big for scratch");
             vga_clear();
             return 1;
         }
+        for (u32 i = 0; i < (u32)STAGE2_SECTORS * 512u; i++)
+            snap[i] = ((const u8 *)0x7E00u)[i];
+        hdimg_set_stage2(snap);
     }
-    for (u32 i = 0; i < INSTALL_SECTORS * 512; i++)
-        INSTALL_SNAP[i] = INSTALL_SRC[i];
-    for (u32 s = 0; s < INSTALL_SECTORS;) {
-        u32 n = INSTALL_SECTORS - s;
-        if (n > 32) n = 32;
-        if (ata_write(0, s, INSTALL_SNAP + s * 512, n)) {
+    for (u32 s = 0; s < hdimg_sectors();) {
+        u32 n = hdimg_sectors() - s;
+        if (n > INSTALL_CHUNK_SEC) n = INSTALL_CHUNK_SEC;
+        for (u32 i = 0; i < n; i++)
+            hdimg_sector(s + i, inst_chunk + i * 512u);
+        if (ata_write(0, s, inst_chunk, n)) {
             tui_msg("Error", "write failed; disk may be bad");
             vga_clear();
             return 1;
         }
         s += n;
-        tui_progress_update((int)(s * 70 / INSTALL_SECTORS));
+        tui_progress_update((int)(s * 70 / hdimg_sectors()));
     }
     tui_progress("Installing", "Verifying...");
-    {
-        u8 sec[512];
-        for (u32 s = 0; s < INSTALL_SECTORS; s++) {
-            if (ata_read(0, s, sec, 1)) {
-                tui_msg("Error", "read-back failed");
-                vga_clear();
-                return 1;
-            }
-            for (u32 i = 0; i < 512; i++) {
-                if (sec[i] != INSTALL_SNAP[s * 512 + i]) {
-                    tui_msg("Error", "verify mismatch");
+    for (u32 s = 0; s < hdimg_sectors();) {
+        u32 n = hdimg_sectors() - s;
+        if (n > INSTALL_CHUNK_SEC) n = INSTALL_CHUNK_SEC;
+        for (u32 i = 0; i < n; i++)
+            hdimg_sector(s + i, inst_chunk + i * 512u);
+        {
+            u8 sec[512];
+            for (u32 i = 0; i < n; i++) {
+                if (ata_read(0, s + i, sec, 1)) {
+                    tui_msg("Error", "read-back failed");
                     vga_clear();
                     return 1;
                 }
+                for (u32 k = 0; k < 512; k++) {
+                    if (sec[k] != inst_chunk[i * 512u + k]) {
+                        tui_msg("Error", "verify mismatch");
+                        vga_clear();
+                        return 1;
+                    }
+                }
             }
-            tui_progress_update(70 + (int)(s * 30 / INSTALL_SECTORS));
         }
+        s += n;
+        tui_progress_update(70 + (int)(s * 30 / hdimg_sectors()));
     }
     /* persist hostname+users collected above (live media: the
      * session hooks are no-ops, so flush explicitly) */
@@ -1333,8 +1343,8 @@ static int b_install(int argc, char **argv, const char *in) {
     {
         static const char *btns[] = { "Reboot now", "Back to shell" };
         tui_msg("Installation complete",
-                "BleeOS is on the disk. Boot it without\n"
-                "the floppy (`-boot order=c`).");
+                "BleeOS is on the disk (BIOS + UEFI bootable).\n"
+                "Boot it without the install media.");
         if (tui_dialog("Finished", "Reboot into the new system?",
                        btns, 2) == 0)
             reboot();

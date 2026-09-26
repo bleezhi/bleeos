@@ -14,13 +14,16 @@ OVMF ?= /usr/share/edk2-ovmf/x64/OVMF.4m.fd
 DISPLAY_BACKEND ?= $(if $(or $(DISPLAY),$(WAYLAND_DISPLAY)),sdl,none)
 
 # MBR loads this many sectors (must cover the whole stage2 binary)
-STAGE2_SECTORS=256
+STAGE2_SECTORS=288
 
 CFLAGS=-m32 -march=i386 -mno-mmx -mno-sse -mno-sse2 -ffreestanding -nostdlib -nostartfiles -nodefaultlibs \
        -fno-builtin -fno-stack-protector -fno-pie -no-pie \
        -Wall -Wextra -O2 -std=gnu11
 
-OBJS=kernel_entry.o drivers.o bootmenu.o shell.o kernel.o vbe.o gfx.o mouse.o wm.o apps.o login.o ata.o users.o uhci.o usb.o tui.o pkg.o doom.o e1000.o net.o vt.o term.o irq.o irq_c.o heap.o pci.o fbcon.o
+OBJS=kernel_entry.o drivers.o bootmenu.o shell.o kernel.o vbe.o gfx.o mouse.o wm.o apps.o login.o ata.o users.o uhci.o usb.o tui.o pkg.o doom.o e1000.o net.o vt.o term.o irq.o irq_c.o heap.o pci.o fbcon.o hdimg.o
+# install blobs: boot.bin (MBR for HD targets) + BOOTX64.EFI (ESP for HD
+# targets), embedded as binary objects for the installer backend
+BOOTBINDS=bootbind.o loaderbind.o
 
 all: os.img
 
@@ -101,6 +104,9 @@ vt.o: vt.c vt.h drivers.h
 fbcon.o: fbcon.c fbcon.h gfx.h drivers.h
 	$(CC) $(CFLAGS) -c fbcon.c -o fbcon.o
 
+hdimg.o: hdimg.c hdimg.h drivers.h
+	$(CC) $(CFLAGS) -c hdimg.c -o hdimg.o
+
 term.o: term.c wm.h gfx.h vt.h shell.h drivers.h
 	$(CC) $(CFLAGS) -c term.c -o term.o
 
@@ -116,8 +122,10 @@ uhci.o: uhci.c uhci.h pci.h drivers.h
 usb.o: usb.c usb.h uhci.h drivers.h
 	$(CC) $(CFLAGS) -c usb.c -o usb.o
 
-kernel.elf: $(OBJS) linker.ld
-	$(LD) -m elf_i386 -T linker.ld -o kernel.elf $(OBJS)
+kernel.elf: $(OBJS) $(BOOTBINDS) linker.ld
+	$(LD) -m elf_i386 -T linker.ld -o kernel.elf $(OBJS) $(BOOTBINDS)
+	@nm kernel.elf | grep -q '^00008000 T uefi_entry$$' || \
+		(echo "ERROR: uefi_entry moved from 0x8000; update UEFI_ENTRY_ADDR"; exit 1)
 
 # stage2 = flat menu+kernel image, padded to whole sectors
 kernel.bin: kernel.elf
@@ -221,19 +229,25 @@ UEFI_CFLAGS=-m64 -ffreestanding -nostdlib -nostartfiles -nodefaultlibs \
 # the trampoline symbols are hidden (see loader.c), so the PE carries a
 # single anchor reloc. -fno-ident drops .comment: ld would place it
 # outside SizeOfImage and EDK2 rejects such images (Load Error).
-# uefi_entry's linked address, for the loader's 32-bit jump target
-UEFI_ENTRY_ADDR=0x$(shell nm kernel.elf | sed -n 's/^\([0-9a-f]*\) T uefi_entry$$/\1/p')
+# NOTE: the loader needs no kernel symbols (UEFI_ENTRY_ADDR is a fixed
+# ABI from uefiparam.h), so no kernel.elf dependency here: the kernel
+# embeds this loader for `install`, which would otherwise be circular.
 
 uefi/loader.o: uefi/loader.c uefi/efi.h uefiparam.h
-	$(CC) $(UEFI_CFLAGS) -DUEFI_ENTRY_ADDR=$(UEFI_ENTRY_ADDR) -c uefi/loader.c -o uefi/loader.o
+	$(CC) $(UEFI_CFLAGS) -c uefi/loader.c -o uefi/loader.o
 
 uefi/tramp.o: uefi/tramp.S
 	$(CC) $(UEFI_CFLAGS) -c uefi/tramp.S -o uefi/tramp.o
 
-BOOTX64.EFI: uefi/loader.o uefi/tramp.o kernel.elf
-	@test -n "$(UEFI_ENTRY_ADDR)" || (echo "ERROR: uefi_entry not found"; exit 1)
+BOOTX64.EFI: uefi/loader.o uefi/tramp.o
 	$(LD) -mi386pep --subsystem=10 --enable-reloc-section -e efi_main -o BOOTX64.EFI uefi/loader.o uefi/tramp.o
-	@echo "uefi loader: entry $(UEFI_ENTRY_ADDR)"
+
+# embedded install blobs (symbols _binary_<name>_start/_end)
+bootbind.o: boot.bin
+	$(OBJCOPY) -I binary -O elf32-i386 -B i386 boot.bin bootbind.o
+
+loaderbind.o: BOOTX64.EFI
+	$(OBJCOPY) -I binary -O elf32-i386 -B i386 BOOTX64.EFI loaderbind.o
 
 esp.img: BOOTX64.EFI kernel.bin tools/mkesp.py
 	python3 tools/mkesp.py BOOTX64.EFI kernel.bin esp.img
@@ -249,7 +263,7 @@ run-uefi: esp.img
 		-drive file=esp.img,format=raw,if=ide -boot order=c,strict=on -net none
 
 clean:
-	rm -f boot.bin $(OBJS) kernel.elf kernel.bin os.img
+	rm -f boot.bin $(OBJS) $(BOOTBINDS) kernel.elf kernel.bin os.img
 	rm -f uefi/loader.o uefi/tramp.o BOOTX64.EFI esp.img
 
 .PHONY: all run run-nographic clean

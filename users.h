@@ -17,5 +17,7 @@ int  users_validname(const char *name); /* 1 if usable as a login name */
 void users_set_installed(int on);
 /* force ramfs DB to disk now (installer, live media); 0 ok, -1 no disk */
 int users_flush(void);
+/* adopt a valid on-disk DB if present (UEFI boot probe); 0 ok, -1 none */
+int users_try_restore(void);
 
 #endif

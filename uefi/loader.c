@@ -16,9 +16,9 @@
 #include "efi.h"
 #include "../uefiparam.h"
 
-/* uefi_entry's linked address, from the Makefile (nm kernel.elf). */
+/* uefi_entry's linked address: fixed ABI (UEFI_ENTRY_ADDR). */
 #ifndef UEFI_ENTRY_ADDR
-#error "UEFI_ENTRY_ADDR not defined (Makefile passes it)"
+#error "UEFI_ENTRY_ADDR not defined (uefiparam.h)"
 #endif
 
 #define KERNEL_LOAD 0x7E00u
@@ -89,7 +89,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *ST_) {
     EFI_LOADED_IMAGE_PROTOCOL *Loaded;
     EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *FS;
     EFI_FILE_PROTOCOL *Root, *Kern;
-    EFI_GRAPHICS_OUTPUT_PROTOCOL *Gop;
+    EFI_GRAPHICS_OUTPUT_PROTOCOL *Gop = 0;
     EFI_STATUS st;
     UINTN sz;
     u64 kbase = KERNEL_ALLOC_BASE;
@@ -137,7 +137,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *ST_) {
                 ((u64)info_buf[10] << 16) | ((u64)info_buf[11] << 24) |
                 ((u64)info_buf[12] << 32) | ((u64)info_buf[13] << 40) |
                 ((u64)info_buf[14] << 48) | ((u64)info_buf[15] << 56);
-        if (ksize == 0 || ksize > 0x20000) {   /* stage2 max, see Makefile */
+        if (ksize == 0 || ksize > 0x24000) {   /* stage2 max, see Makefile */
             fail("ERR: bad kernel.bin size");
             return 1;
         }
@@ -168,11 +168,49 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *ST_) {
     }
     puts_ascii("kernel.bin ok\n");
 
-    /* --- GOP framebuffer --- */
+    /* --- GOP framebuffer: pick the largest 32-bit direct-color
+     * mode the desktop can handle (shadow buffer tops out at
+     * 1920x1200), then record it --- */
     param->magic = 0;
     param->has_gop = 0;
     st = BS->LocateProtocol(&GopGuid, 0, (void **)&Gop);
-    if (!st && Gop && Gop->Mode && Gop->Mode->Info &&
+    if (!st && Gop && Gop->Mode) {
+        u32 best = Gop->Mode->Mode, bw = 0, bh = 0, bgr = 0;
+        int have = 0;
+        for (u32 m = 0; m < Gop->Mode->MaxMode; m++) {
+            EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *mi = 0;
+            UINTN misz = 0;
+            u32 w, h;
+            int fmt;
+            if (Gop->QueryMode(Gop, m, &misz, &mi) || !mi)
+                continue;
+            fmt = mi->PixelFormat;
+            if (fmt != 0 && fmt != 1)
+                continue;   /* BitMask/BltOnly: no direct framebuffer */
+            w = mi->HorizontalResolution;
+            h = mi->VerticalResolution;
+            if (w > 1920 || h > 1200 || !w || !h)
+                continue;   /* beyond the gfx shadow buffer */
+            if (!have || (u64)w * h > (u64)bw * bh ||
+                ((u64)w * h == (u64)bw * bh && fmt == 1 && !bgr)) {
+                best = m; bw = w; bh = h;
+                bgr = (fmt == 1);
+                have = 1;
+            }
+        }
+        if (have && best != Gop->Mode->Mode) {
+            if (Gop->SetMode(Gop, best))
+                have = 0;   /* SetMode failed: use whatever is current */
+            else {
+                puts_ascii("GOP mode set: ");
+                put_hex(bw);
+                puts_ascii("x");
+                put_hex(bh);
+                puts_ascii("\n");
+            }
+        }
+    }
+    if (Gop && Gop->Mode && Gop->Mode->Info &&
         Gop->Mode->FrameBufferBase) {
         param->has_gop = 1;
         param->fb_base = Gop->Mode->FrameBufferBase;

@@ -191,8 +191,27 @@ static u16 pit_count(void) {
 
 void sleep_ms(u32 ms) {
     u32 irq_on;
+    /* stall detector for PIC-less hardware: if the PIT runs but the
+     * 100Hz tick counter stops advancing, interrupts are dead (no
+     * 8259/APIC path) and hlt would sleep forever: busy-poll instead.
+     * Two port reads per call; no behavior change when ticks advance. */
+    static int live = 1, first = 1;
+    static u32 last_tick;
+    static u16 last_pit;
+    u32 now_tick = timer_ticks();
+    u16 now_pit = pit_count();
+    if (first) {
+        first = 0;
+    } else if (live && now_tick == last_tick &&
+               (u16)(last_pit - now_pit) > 1193u * 50u) {
+        live = 0;   /* 50ms of PIT time, zero ticks */
+    } else if (!live && now_tick != last_tick) {
+        live = 1;   /* ticks recovered */
+    }
+    last_pit = now_pit;
+    last_tick = now_tick;
     __asm__ volatile ("pushf; pop %0" : "=r"(irq_on));
-    if ((irq_on & 0x200) && timer_ticks_ready()) {
+    if (live && (irq_on & 0x200) && timer_ticks_ready()) {
         /* interrupts live: halt until the 100Hz tick counter covers it */
         u32 end = timer_ticks() + (ms + 9) / 10 + 1;
         sti();

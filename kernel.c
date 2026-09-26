@@ -25,12 +25,12 @@ int uefi_active(void) { return uefi_mode; }
 
 static void kernel_early(void) {
     {
-        /* fixed 56KB heap clear of everything: kernel image ends
-         * below 0x60000 (asserted), installer snapshot ends at
-         * 0x60200, stack at 0x90000 */
+        /* fixed heap clear of everything: kernel image ends below
+         * 0x60000 (asserted), installer snapshot ends below 0x70000,
+         * heap is 56KB at 0x70000, stack at 0x90000 */
         extern char __bss_end;
         ASSERT((u32)&__bss_end <= 0x60000u, "kernel too big for heap");
-        if (heap_init(0x62000u, 0x70000u))
+        if (heap_init(0x70000u, 0x7E000u))
             panic("heap init failed");
     }
     irq_init();    /* IDT + PIC (IF still clear) */
@@ -132,6 +132,27 @@ void kernel_main(const boot_info_t *info) {
             vga_print(utoa10(d.sectors / 2048, num));
             vga_print(" MB) - `install` writes BleeOS to it\n");
         }
+    } else {
+        extern u8 ata_dbg_step[2], ata_dbg_status[2], ata_dbg_cyl[2];
+        char num[16];
+        serial_print("ata probe failed m step=");
+        serial_print(utoa10(ata_dbg_step[0], num));
+        serial_print(" status=");
+        serial_print(utoa10(ata_dbg_status[0], num));
+        serial_print(" cyl=");
+        serial_print(utoa10(ata_dbg_cyl[0], num));
+        serial_print(" s step=");
+        serial_print(utoa10(ata_dbg_step[1], num));
+        serial_print(" status=");
+        serial_print(utoa10(ata_dbg_status[1], num));
+        serial_print(" cyl=");
+        serial_print(utoa10(ata_dbg_cyl[1], num));
+        serial_print("\n");
+    }
+    if (uefi_mode && !uefi_inst && users_try_restore() == 0) {
+        /* no BIOS drive byte under UEFI: adopt the on-disk DB when
+         * this media was installed (same sectors the BIOS path uses) */
+        vga_print("installed on HDD: users persist.\n");
     }
     {
         /* USB stub: detector only, PS/2 stays live */

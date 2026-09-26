@@ -2,9 +2,12 @@
 ; Linked at 0x7E00 via linker.ld. Assembled as elf32 (no ORG; linker sets vaddr).
 ; The bootloader jumps here in real mode; we set up the GDT, enable A20,
 ; set CR0.PE and far-jump into 32-bit code, then call the C kernel_main.
+; uefi_entry lives in its own section pinned at a FIXED address
+; (UEFI_ENTRY_ADDR, see uefiparam.h) so the UEFI loader — including the
+; copy embedded in the kernel for the installer — never needs nm.
 
 [BITS 16]
-section .text
+section .text.entry progbits alloc exec
 global _start
 extern boot_main
 extern uefi_main
@@ -81,7 +84,9 @@ protected_entry:
 
 ; --- UEFI entry: loader already dropped to 32-bit PM with a flat
 ; GDT (code 0x08, data 0x10). Same Bring-up, minus the real-mode
-; prelude. Never returns (uefi_main loops via the shell/menu). ---
+; prelude. Never returns (uefi_main loops via the shell/menu).
+; Pinned at UEFI_ENTRY_ADDR by linker.ld (section .text.uefi). ---
+section .text.uefi progbits alloc exec
 global uefi_entry
 uefi_entry:
     cli                         ; firmware may leave IRQs on
@@ -124,6 +129,8 @@ uefi_entry:
     jmp .uhang
 
 ; ---------------- GDT: null + 32-bit code + 32-bit data (4GB flat) ----------------
+; Back in .text: only code lives at the pinned addresses.
+section .text
 align 8
 gdt_start:
     dq 0x0000000000000000

@@ -7,6 +7,11 @@
 #define UEFIPARAM_ADDR 0x7000u
 #define UEFIPARAM_MAGIC 0x55454946u
 
+/* Fixed 32-bit entry point (pinned by linker.ld): the UEFI loader —
+ * including the copy embedded in the kernel for `install` — jumps
+ * here without needing nm. Keep in sync with linker.ld. */
+#define UEFI_ENTRY_ADDR 0x8000u
+
 typedef struct {
     unsigned int magic;
     unsigned int has_gop;      /* GOP framebuffer valid */

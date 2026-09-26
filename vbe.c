@@ -155,8 +155,10 @@ int vbe_available(void) {
 int vbe_set(int w, int h, int bpp) {
     if (uefi_gop) {
         /* no mode switch without boot services: run the desktop at
-         * the native GOP resolution. Accept iff 32bpp asked. */
+         * the native GOP resolution. Accept iff 32bpp asked and the
+         * mode fits the gfx shadow buffer (see loader cap). */
         if (bpp != 32 || !cur_lfb) return -1;
+        if ((u32)cur_w * (u32)cur_h > 1920u * 1200u) return -1;
         (void)w; (void)h;
         return 0;
     }

@@ -7,8 +7,9 @@
 #define UMAX 16   /* max login name length */
 #define PMAX 32   /* max password length (checked, not stored) */
 
-/* on-disk DB: past the OS image (sectors 0..160), at LBA 256 */
-#define UDISK_LBA 256
+/* on-disk DB: past the OS image (MBR + STAGE2_SECTORS stage2).
+ * Keep in sync with STAGE2_SECTORS (Makefile/boot.asm/hdimg.h). */
+#define UDISK_LBA (1 + 288)
 #define UDISK_NSEC 5   /* header + passwd(2) + shadow(2) */
 static const char UMAGIC[8] = { 'B','L','E','E','U','S','E','R' };
 /* header: magic[8] ver[4] plen[4] slen[4] sum[4] hostname[32]
@@ -141,6 +142,19 @@ static int users_load(void) {
     if (ver == 2 && hn[0]) shell_fwrite("/etc/hostname", hn, slen(hn));
     shell_fwrite("/etc/passwd", pw, (u32)pn);
     shell_fwrite("/etc/shadow", sh, (u32)sn);
+    return 0;
+}
+
+/* Boot probe (UEFI has no BIOS drive byte): if a valid DB sits on the
+ * primary master, adopt it and mark persistent. 0 restored, -1 none.
+ * No-op when already persistent. */
+int users_try_restore(void) {
+    ata_dev_t d;
+    if (persist) return 0;
+    if (ata_info(0, &d)) return -1;
+    if (d.sectors < UDISK_LBA + UDISK_NSEC) return -1;
+    if (users_load()) return -1;
+    persist = 1;
     return 0;
 }
 
@@ -403,8 +417,14 @@ int users_setpass(const char *name, const char *pass) {
     if (shell_fread("/etc/shadow", buf, sizeof(buf)) < 0) return -1;
     {
         int off = find_line(buf, name);
+        int m;
         if (off < 0) return -1;
         cut_line(buf, off);
+        /* write the cut back: append_line below re-reads the file,
+         * so a missing write here used to resurrect the old entry */
+        m = 0;
+        while (buf[m]) m++;
+        if (shell_fwrite("/etc/shadow", buf, (u32)m)) return -1;
     }
     {
         char salt[5], hash[9];

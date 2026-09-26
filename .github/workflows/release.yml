@@ -1,0 +1,45 @@
+# Build bootable images and publish them as a GitHub release.
+# Cut a release with: git tag vX.Y && git push origin vX.Y
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nasm gcc-multilib xorriso
+      - name: Build images
+        run: make os.img esp.img iso
+      - name: Self-test install image generator
+        run: sh tools/test_hdimg.sh
+      - name: Create GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          prev=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          {
+            echo "BleeOS $tag — bootable images."
+            echo ""
+            echo "- os.img — BIOS boot (floppy image)"
+            echo "- esp.img — UEFI boot (FAT16 ESP disk image)"
+            echo "- bleeos.iso — bootable CD (El Torito)"
+            echo ""
+            echo "Default login: root / root. See README.md."
+            if [ -n "$prev" ]; then
+              echo ""
+              echo "Changes since $prev:"
+              git log --oneline "$prev..HEAD"
+            fi
+          } > /tmp/notes.md
+          gh release create "$tag" --title "BleeOS $tag" \
+            --notes-file /tmp/notes.md os.img esp.img bleeos.iso
