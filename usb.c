@@ -1,6 +1,7 @@
 /* USB core + HID boot-protocol enumeration. */
 #include "usb.h"
 #include "uhci.h"
+#include "xhci.h"
 #include "drivers.h"
 #define USB_REQ_GET_DESCRIPTOR 6
 #define USB_REQ_SET_ADDRESS 5
@@ -19,7 +20,7 @@ typedef struct {
     u8 kbd_prev[6], kbd_mod;
 } hid_dev_t;
 static hid_dev_t devs[2];
-static int ndev, scanned;
+static int ndev, scanned, xndev;
 static int ctrl(u8 a,u8 m,int low,u8 rt,u8 req,u16 val,u16 idx,
                 void *buf,int len,int in) {
     u8 s[8];
@@ -82,11 +83,17 @@ static int enumerate_port(int port) {
     return 0;
 }
 int usb_scan(void) {
-    if(scanned)return ndev;scanned=1;
-    if(uhci_init())return 0;
-    for(int p=0;p<uhci_nports();p++)if(uhci_connected(p)&&!enumerate_port(p)) {
-        char b[12];klog("usb: HID device enumerated (addr ");
-        klog(utoa10(devs[ndev-1].addr,b));klog(")\n");
+    if(scanned)return ndev;scanned=1;ndev=0;xndev=0;
+    if(xhci_init()==0){
+        for(int p=0;p<xhci_nports()&&xndev<2;p++)
+            if(xhci_connected(p)&&xhci_enumerate_port(p,xndev)==0)xndev++;
+        ndev+=xndev;
+    }
+    if(uhci_init()==0){
+        for(int p=0;p<uhci_nports()&&ndev<2;p++)if(uhci_connected(p)&&!enumerate_port(p)) {
+            char b[12];klog("usb: UHCI HID device enumerated (addr ");
+            klog(utoa10(devs[ndev-1].addr,b));klog(")\n");
+        }
     }
     return ndev;
 }
@@ -125,8 +132,10 @@ static char keychar(u8 k,int shift,int caps) {
     }
 }
 int usb_hid_trykey(void) {
+    int k;
+    for(int i=0;i<xndev;i++) if(xhci_hid_trykey(i,&k)==0) return k;
     u8 r[8];
-    for(int d=0;d<ndev;d++){hid_dev_t*h=&devs[d];
+    for(int d=0;d<ndev-xndev;d++){hid_dev_t*h=&devs[d];
         if(!h->used||!h->kbd_ep)continue;
         if(uhci_intr_in(h->addr,h->kbd_ep,h->kbd_mps,h->low,r,8,&h->kbd_toggle))continue;
         h->kbd_mod=r[0];
@@ -145,8 +154,9 @@ int usb_hid_trykey(void) {
     return -1;
 }
 int usb_hid_mouse_poll(int *dx,int *dy,int *btn) {
+    for(int i=0;i<xndev;i++) if(xhci_hid_mouse(i,dx,dy,btn)) return 1;
     u8 r[4];
-    for(int d=0;d<ndev;d++){hid_dev_t*h=&devs[d];
+    for(int d=0;d<ndev-xndev;d++){hid_dev_t*h=&devs[d];
         if(!h->used||!h->mouse_ep)continue;
         if(uhci_intr_in(h->addr,h->mouse_ep,h->mouse_mps,h->low,r,4,&h->mouse_toggle))continue;
         *btn=r[0]&7;*dx=(int)(signed char)r[1];*dy=-(int)(signed char)r[2];return 1;
