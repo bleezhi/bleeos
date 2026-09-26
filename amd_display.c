@@ -24,7 +24,6 @@ static int known_dcn21(u16 did) {
         case 0x1638:
         case 0x164c:
         case 0x164e:
-        case 0x15e7: /* Barcelo / Barcelo-R, Ryzen 7x30 family */
             return 1;
         default:
             return 0;
