@@ -10,7 +10,7 @@
 #include "pci.h"
 
 #define AMD_VENDOR_ID 0x1002u
-#define PCI_CLASS_DISPLAY 0x0300u
+#define PCI_CLASS_DISPLAY 0x030000u
 
 static int present;
 static int dcn21;
@@ -19,6 +19,7 @@ static u32 mmio_base;
 
 static int known_dcn21(u16 did) {
     switch (did) {
+        case 0x15e7: /* Barcelo / Barcelo-R */
         case 0x1636:
         case 0x1638:
         case 0x164c:
