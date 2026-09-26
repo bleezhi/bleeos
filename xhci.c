@@ -167,7 +167,12 @@ static int control_x(xdev_t *d,const u8 setup[8],void *buf,int len,int in){
     u64 bp=ptr64(buf);
     int i=d->ep_i, cyc=d->ep_cycle;
     u32 trt=in?TRB_TRT_IN:(len?TRB_TRT_OUT:0);
-    t=&ctrl_rings[d->index][i];t->a=(u32)ptr64(setup);t->b=0;t->c=8;t->d=TRB_SETUP|TRB_IDT|TRB_CHAIN|trt|(u32)cyc;
+    /* Setup TRB uses immediate 8-byte USB setup data, not a pointer. */
+    t=&ctrl_rings[d->index][i];
+    t->a=(u32)setup[0]|((u32)setup[1]<<8)|((u32)setup[2]<<16)|((u32)setup[3]<<24);
+    t->b=(u32)setup[4]|((u32)setup[5]<<8)|((u32)setup[6]<<16)|((u32)setup[7]<<24);
+    t->c=8;
+    t->d=TRB_SETUP|TRB_IDT|TRB_CHAIN|trt|(u32)cyc;
     i++;
     if(len){
         t=&ctrl_rings[d->index][i];t->a=(u32)bp;t->b=(u32)(bp>>32);t->c=(u32)len;
