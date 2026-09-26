@@ -9,6 +9,7 @@ void apps_open_aap(void);
 int  apps_aap_key(int k);
 void apps_aap_closed(int id);
 void apps_aap_reset(void);
+void apps_aap_tick(void);
 int  apps_custom_key(int k);  /* custom-res editor: 1 = key consumed */
 void apps_open_doom(void);
 int  apps_game_key(int k);    /* doom window: 1 = key consumed */
