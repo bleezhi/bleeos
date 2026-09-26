@@ -4,6 +4,12 @@ name: release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (for example v0.1.0)"
+        required: true
+        type: string
 permissions:
   contents: write
 jobs:
@@ -25,7 +31,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          tag="${GITHUB_REF_NAME}"
+          tag="${{ inputs.tag || github.ref_name }}"
           prev=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
           {
             echo "BleeOS $tag — bootable images."
