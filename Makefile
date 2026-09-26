@@ -35,7 +35,7 @@ boot.bin: boot.asm
 kernel_entry.o: kernel_entry.asm
 	$(AS) -f elf32 kernel_entry.asm -o kernel_entry.o
 
-drivers.o: drivers.c drivers.h
+drivers.o: drivers.c drivers.h usb.h
 	$(CC) $(CFLAGS) -c drivers.c -o drivers.o
 
 bootmenu.o: bootmenu.c drivers.h boot.h
@@ -53,7 +53,7 @@ vbe.o: vbe.c vbe.h drivers.h
 gfx.o: gfx.c gfx.h drivers.h
 	$(CC) $(CFLAGS) -c gfx.c -o gfx.o
 
-mouse.o: mouse.c mouse.h drivers.h
+mouse.o: mouse.c mouse.h drivers.h usb.h
 	$(CC) $(CFLAGS) -c mouse.c -o mouse.o
 
 wm.o: wm.c wm.h vbe.h gfx.h mouse.h drivers.h
