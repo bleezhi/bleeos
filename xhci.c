@@ -166,9 +166,10 @@ static void ep_ring_reset(int index){
 }
 static int xfer_wait(u32 slot,u32 *actual){
     u32 status=0;
-    while(1){
+    int timeout=500;
+    while(timeout--){
         trb_t *e=&event_ring[ev_i];
-        if((e->d&1u)!=((u32)ev_cycle)){ sleep_ms(1); if(!slot) return -1; continue; }
+        if((e->d&1u)!=((u32)ev_cycle)){ sleep_ms(1); continue; }
         u32 et=(e->d>>10)&63;
         u32 sl=e->d>>24;
         u32 epid=(e->d>>16)&31;
@@ -180,10 +181,10 @@ static int xfer_wait(u32 slot,u32 *actual){
         status=(e->c>>24)&255;
         ev_i++; if(ev_i==64){ev_i=0;ev_cycle^=1;}
         ev_dequeue=(u32)ptr64(&event_ring[ev_i]); rw(rt+0x38,ev_dequeue|8);
-        break;
+        if(actual)*actual=0;
+        return (status==COMP_SUCCESS||status==COMP_SHORT)?0:-1;
     }
-    if(actual)*actual=0;
-    return (status==COMP_SUCCESS||status==COMP_SHORT)?0:-1;
+    return -1;
 }
 
 static int control_x(xdev_t *d,const u8 setup[8],void *buf,int len,int in){
