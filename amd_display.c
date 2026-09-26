@@ -63,6 +63,7 @@ int amd_display_init(void) {
 int amd_display_present(void) { return present; }
 int amd_display_is_dcn21(void) { return dcn21; }
 u32 amd_display_mmio(void) { return mmio_base; }
+u16 amd_display_device(void) { return device_id; }
 
 /* Hardware page-flipping is not enabled yet; GOP remains authoritative. */
 int amd_display_present_frame(void) { return -1; }
