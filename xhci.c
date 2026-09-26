@@ -232,7 +232,7 @@ static int configure_ep(xdev_t*d,u8 epnum,u8 mps,u8 interval){
     e0[0]=3u<<16;e0[1]=(4u<<3)|((u32)d->mps<<16);
     e0[2]=(u32)ptr64(ctrl_rings[d->index])|1;e0[3]=(u32)(ptr64(ctrl_rings[d->index])>>32);e0[4]=8;
     u32 *ep=ctx(in_ctx,epnum);
-    ep[0]=((u32)interval<<16);
+    ep[0]=(3u<<1)|((u32)interval<<16);
     ep[1]=(((epnum&1)?7u:3u)<<3)|((u32)mps<<16);
     ep[2]=(u32)ptr64(ep_ring)|1;ep[3]=(u32)(ptr64(ep_ring)>>32);
     ep[4]=8;
@@ -362,13 +362,16 @@ int xhci_enumerate_port(int p,int index){
     if(index>=ndev)ndev=index+1;
     return 0;
 }
-static int poll_transfer_event(u32 slot,u32 *status){
+static int poll_transfer_event(u32 slot,u8 epid,u32 *status){
     trb_t *e=&event_ring[ev_i];
     if((e->d&1u)!=((u32)ev_cycle))return 0;
-    u32 et=(e->d>>10)&63, st=e->c;
+    u32 et=(e->d>>10)&63;
+    if(et!=TRB_TRANSFER)return 0;
+    if((e->d>>24)!=slot || ((e->d>>16)&31)!=epid)return 0;
+    u32 st=e->c;
     ev_i++;if(ev_i==64){ev_i=0;ev_cycle^=1;}
     ev_dequeue=(u32)ptr64(&event_ring[ev_i]);rw(rt+0x38,ev_dequeue|8);
-    if(et!=TRB_TRANSFER)return 0;if(status)*status=(st>>24)&255;return 1;
+    if(status)*status=(st>>24)&255;return 1;
 }
 static void queue_intr(xdev_t*x,u8 ep,void*buf,int len){
     trb_t*ring=(ep&1)?kbd_rings[x->index]:mouse_rings[x->index];
@@ -380,7 +383,7 @@ int xhci_hid_trykey(int index,int *out){
     if(!ready||index<0||index>=ndev||!devs[index].used||!devs[index].kbd_ep)return -1;
     xdev_t*x=&devs[index];u32 st;
     if(!k_pending[index]){queue_intr(x,x->kbd_ep,kbuf[index],8);k_pending[index]=1;return -1;}
-    int ev=poll_transfer_event(x->slot,&st);if(!ev)return -1;k_pending[index]=0;
+    int ev=poll_transfer_event(x->slot,(u8)(x->kbd_ep*2+1),&st);if(!ev)return -1;k_pending[index]=0;
     if(st!=COMP_SUCCESS&&st!=COMP_SHORT)return -1;
     u8*r=kbuf[index];x->mod=r[0];
     for(int i=0;i<6;i++){u8 k=r[2+i];int held=0;for(int j=0;j<6;j++)if(x->prev[j]==k&&k)held=1;if(!k||held)continue;x->prev[i]=k;
@@ -395,6 +398,6 @@ int xhci_hid_trykey(int index,int *out){
 int xhci_hid_mouse(int index,int*dx,int*dy,int*btn){
     if(!ready||index<0||index>=ndev||!devs[index].used||!devs[index].mouse_ep)return 0;
     xdev_t*x=&devs[index];u32 st;if(!m_pending[index]){queue_intr(x,x->mouse_ep,mbuf[index],4);m_pending[index]=1;return 0;}
-    int ev=poll_transfer_event(x->slot,&st);if(!ev)return 0;m_pending[index]=0;if(st!=COMP_SUCCESS&&st!=COMP_SHORT)return 0;
+    int ev=poll_transfer_event(x->slot,(u8)(x->mouse_ep*2+1),&st);if(!ev)return 0;m_pending[index]=0;if(st!=COMP_SUCCESS&&st!=COMP_SHORT)return 0;
     u8*r=mbuf[index];*btn=r[0]&7;*dx=(int)(signed char)r[1];*dy=-(int)(signed char)r[2];return 1;
 }
