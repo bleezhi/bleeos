@@ -260,7 +260,8 @@ static int configure_ep(xdev_t*d,u8 epnum,u8 mps,u8 interval){
     u32 *ep=ctx(in_ctx,epnum);
     trb_t *ring=(epnum&1)?kbd_rings[d->index]:mouse_rings[d->index];
     ep[0]=(3u<<1)|((u32)fs_interval(interval)<<16);
-    ep[1]=(((epnum&1)?7u:3u)<<3)|((u32)mps<<16);
+    /* xHCI endpoint type: 3 = interrupt IN, 7 = interrupt OUT. */
+    ep[1]=(((epnum&1)?3u:7u)<<3)|((u32)mps<<16);
     ep[2]=(u32)ptr64(ring)|1;ep[3]=(u32)(ptr64(ring)>>32);
     ep[4]=8;
     return command((u32)ptr64(in_ctx),(u32)(ptr64(in_ctx)>>32),0,
