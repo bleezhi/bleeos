@@ -77,7 +77,7 @@ static void aap_draw(win_t *w, int cx, int cy) {
     aap_draw_button(cx, cy, 224, AAP_TIMELINE_Y + 44, 64, "Clear", 0);
     aap_draw_button(cx, cy, 294, AAP_TIMELINE_Y + 44, 64, aap_play ? "Stop" : "Play", aap_play);
 
-    gfx_text(cx + 372, cy + AAP_TIMELINE_Y + 51, "Keys: arrows move, printable keys draw, Space erases, P previews", INK, GFX_TRANS);
+    gfx_text(cx + 370, cy + AAP_TIMELINE_Y + 51, "Arrows/type: draw   Space: erase   P: play", INK, GFX_TRANS);
 }
 static void aap_click(win_t *w, int x, int y, int btn) {
     (void)w; (void)btn;
@@ -117,7 +117,7 @@ static int aap_key(int k) {
     wm_dirty();
     return 1;
 }
-static void aap_tick(void) {
+void apps_aap_tick(void) {
     if (!aap_play) return;
     aap_frame = (aap_frame + 1) % AAP_FRAMES;
 }
