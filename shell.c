@@ -13,6 +13,7 @@
 #include "pkg.h"
 #include "e1000.h"
 #include "net.h"
+#include "heap.h"
 
 /* ================= string helpers ================= */
 static void scpy(char *d, const char *s) { while ((*d++ = *s++)) ; }
@@ -866,6 +867,7 @@ static int b_run(int argc, char **argv, const char *in);
 static int b_pkg(int argc, char **argv, const char *in);
 static int b_net(int argc, char **argv, const char *in);
 static int b_ping(int argc, char **argv, const char *in);
+static int b_mem(int argc, char **argv, const char *in);
 static int run_line(char *line);
 static int read_new_pass(char *buf, u32 cap);
 static int b_vgaregs(int argc, char **argv, const char *in);
@@ -970,6 +972,10 @@ static const char MAN_PKG[] =
     "(registry in /pkg/registry). No network: archives come\n"
     "from ramfs files or raw disk sectors (see the website).\n"
     "Run installed scripts with `run /pkg/<name>/...`.\n";
+static const char MAN_MEM[] =
+    "mem - heap statistics\nUsage: mem\n"
+    "Shows the kernel heap arena (64KB at 0x60000): total,\n"
+    "used, free and block count.\n";
 static const char MAN_SHELL[] =
     "Shell syntax: ' \" quotes, \\ escape, $VAR $? $$,\n"
     "; && || lists, > FILE >> FILE (append), < FILE (stdin).\n"
@@ -982,7 +988,7 @@ static int b_help(int argc, char **argv, const char *in) {
              "  pwd ls cd mkdir touch rm cat env export unset sleep uptime date\n"
              "  history true false test exit reboot halt poweroff gui vgaregs\n"
              "  install logout su passwd useradd userdel users usb\n"
-             "  run pkg net ping\n"
+             "  run pkg net ping mem\n"
              "Syntax: ; && ||  $VAR $?  > >> <  quotes  (see `man shell`)\n");
     return 0;
 }
@@ -1031,6 +1037,7 @@ static const cmd_t cmds[] = {
     {"usb", "USB devices", MAN_USB, b_usb},
     {"run", "run script file", MAN_RUN, b_run},
     {"pkg", "package manager", MAN_PKG, b_pkg},
+    {"mem", "heap stats", MAN_MEM, b_mem},
     {"net", "network status", MAN_NET, b_net},
     {"ping", "ICMP echo", MAN_PING, b_ping},
     {0, 0, 0, 0},
@@ -1726,6 +1733,22 @@ static int b_ping(int argc, char **argv, const char *in) {
     }
     got = net_ping(dst, count);
     return got > 0 ? 0 : 1;
+}
+
+static int b_mem(int argc, char **argv, const char *in) {
+    (void)argc; (void)argv; (void)in;
+    u32 total = heap_total(), used = heap_used();
+    char nb[12];
+    sh_print("heap ");
+    sh_print(sutoa(total, nb, 10, 0));
+    sh_print(" total, ");
+    sh_print(sutoa(used, nb, 10, 0));
+    sh_print(" used, ");
+    sh_print(sutoa(total - used, nb, 10, 0));
+    sh_print(" free, ");
+    sh_print(sutoa(heap_blocks(), nb, 10, 0));
+    sh_print(" blocks\n");
+    return 0;
 }
 
 static int dispatch(int argc, char **argv, const char *in) {

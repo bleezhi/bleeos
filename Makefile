@@ -17,7 +17,7 @@ CFLAGS=-m32 -march=i386 -mno-mmx -mno-sse -mno-sse2 -ffreestanding -nostdlib -no
        -fno-builtin -fno-stack-protector -fno-pie -no-pie \
        -Wall -Wextra -O2 -std=gnu11
 
-OBJS=kernel_entry.o drivers.o bootmenu.o shell.o kernel.o vbe.o gfx.o mouse.o wm.o apps.o login.o ata.o users.o uhci.o usb.o tui.o pkg.o doom.o e1000.o net.o vt.o term.o
+OBJS=kernel_entry.o drivers.o bootmenu.o shell.o kernel.o vbe.o gfx.o mouse.o wm.o apps.o login.o ata.o users.o uhci.o usb.o tui.o pkg.o doom.o e1000.o net.o vt.o term.o irq.o irq_c.o heap.o pci.o
 
 all: os.img
 
@@ -74,6 +74,18 @@ pkg.o: pkg.c pkg.h shell.h drivers.h
 doom.o: doom.c wm.h gfx.h drivers.h
 	$(CC) $(CFLAGS) -c doom.c -o doom.o
 
+irq.o: irq.asm
+	$(AS) -f elf32 irq.asm -o irq.o
+
+irq_c.o: irq.c irq.h drivers.h
+	$(CC) $(CFLAGS) -c irq.c -o irq_c.o
+
+heap.o: heap.c heap.h drivers.h
+	$(CC) $(CFLAGS) -c heap.c -o heap.o
+
+pci.o: pci.c pci.h drivers.h
+	$(CC) $(CFLAGS) -c pci.c -o pci.o
+
 e1000.o: e1000.c e1000.h drivers.h
 	$(CC) $(CFLAGS) -c e1000.c -o e1000.o
 
@@ -92,7 +104,7 @@ pkgs:
 	python3 tools/mkblee.py packages/quote packages/quote.blee
 	cp packages/hello.blee packages/quote.blee docs/
 
-uhci.o: uhci.c uhci.h drivers.h
+uhci.o: uhci.c uhci.h pci.h drivers.h
 	$(CC) $(CFLAGS) -c uhci.c -o uhci.o
 
 usb.o: usb.c usb.h uhci.h drivers.h

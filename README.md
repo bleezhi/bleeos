@@ -76,18 +76,27 @@ BIOS-owned controller is left alone and PS/2 stays the input path.
 Full UHCI enumeration was attempted and dropped (TDs never complete
 on QEMU's UHCI); the stub keeps the door open without the risk.
 
+## Serial log + kernel panic
+COM1 (38400 8N1, polled) mirrors the boot banner via `klog()` (VGA
+screen + serial together); `run-debug` captures it to
+`/tmp/opencode/serial.log`. `panic(msg)` / `ASSERT(c, msg)` print a
+red screen + serial dump and halt (used for impossible driver states,
+e.g. bad ATA sector counts). Faults print vector + error
+over serial/VGA instead of triple-faulting.
+
 ## Network (`net`, `ping`)
 E1000 driver (82540EM, MMIO, polled rings, DMA above 1MB) with
 static SLIRP-LAN config (10.0.2.15/24, gateway 10.0.2.2), an ARP
 cache, and ICMP echo. `run-net` attaches `-device e1000` on
 user-mode networking; `ping 10.0.2.2` answers. No DHCP/DNS/TCP yet.
 
-## Serial log + kernel panic
-COM1 (38400 8N1, polled) mirrors the boot banner via `klog()` (VGA
-screen + serial together); `run-debug` captures it to
-`/tmp/opencode/serial.log`. `panic(msg)` / `ASSERT(c, msg)` print a
-red screen + serial dump and halt (used for impossible driver states,
-e.g. bad ATA sector counts).
+## Kernel core (IDT, timer, heap, PCI)
+Interrupts are on: 8259 PIC remapped (IRQs at 32..47), PIT at
+100Hz driving a tick counter, heap allocator (64KB arena,
+`mem` shows stats), and a PCI bus layer (table, BARs, IRQ lines)
+used by new code (UHCI stub migrated; e1000 predates it).
+Keyboard/mouse stay masked + polled; `sleep_ms` halts on ticks
+when interrupts are live, busy-waits during early boot.
 
 ## ISO (`make iso`, `make run-cd`)
 `bleeos.iso` is built with El Torito floppy emulation (`boot.img` =

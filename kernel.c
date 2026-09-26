@@ -7,6 +7,8 @@
 #include "usb.h"
 #include "uhci.h"
 #include "users.h"
+#include "irq.h"
+#include "heap.h"
 
 static int has_opt(const char *cmdline, const char *opt) {
     int ol = 0;
@@ -28,6 +30,17 @@ void kernel_main(const boot_info_t *info) {
 
     vga_clear();
     serial_init();
+    {
+        /* fixed 64KB heap clear of everything: kernel image ends
+         * below 0x60000 (asserted), scratch areas live at 0x40000,
+         * stack at 0x90000 */
+        extern char __bss_end;
+        ASSERT((u32)&__bss_end <= 0x60000u, "kernel too big for heap");
+        if (heap_init(0x60000u, 0x70000u))
+            panic("heap init failed");
+    }
+    irq_init();    /* IDT + PIC (IF still clear) */
+    timer_init();  /* PIT 100Hz + sti: interrupts live from here */
     vga_setcolor(0x0B);
     klog("==============================\n"
          "  BleeOS 0.3 - 32-bit mode\n"

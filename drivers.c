@@ -176,6 +176,12 @@ int kbd_readline(char *buf, u32 cap) {
     }
 }
 
+/* sleep_ms lives below: hlt-based on ticks when IF=1,
+ * legacy busy-poll when IF=0 (early boot). Declared here for it. */
+extern u32 timer_ticks(void);
+extern int timer_ready(void);
+#define timer_ticks_ready() timer_ready()
+
 /* ================= PIT (busy-wait sleep, no interrupts needed) ================= */
 static u16 pit_count(void) {
     outb(0x43, 0x00);               /* latch channel 0 */
@@ -184,13 +190,25 @@ static u16 pit_count(void) {
 }
 
 void sleep_ms(u32 ms) {
-    u32 need = ms * 1193;           /* 1193182 ticks/sec */
-    u32 acc = 0;
-    u16 prev = pit_count();
-    while (acc < need) {
-        u16 cur = pit_count();
-        acc += (u16)(prev - cur);   /* handles 16-bit wrap */
-        prev = cur;
+    u32 irq_on;
+    __asm__ volatile ("pushf; pop %0" : "=r"(irq_on));
+    if ((irq_on & 0x200) && timer_ticks_ready()) {
+        /* interrupts live: halt until the 100Hz tick counter covers it */
+        u32 end = timer_ticks() + (ms + 9) / 10 + 1;
+        sti();
+        while ((int)(timer_ticks() - end) < 0) hlt();
+        return;
+    }
+    /* IF clear (early boot): legacy busy-poll on the PIT channel */
+    {
+        u32 need = ms * 1193;           /* 1193182 ticks/sec */
+        u32 acc = 0;
+        u16 prev = pit_count();
+        while (acc < need) {
+            u16 cur = pit_count();
+            acc += (u16)(prev - cur);   /* handles 16-bit wrap */
+            prev = cur;
+        }
     }
 }
 
