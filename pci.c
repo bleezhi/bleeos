@@ -1,4 +1,5 @@
-/* PCI configuration via 0xCF8/0xCFC, bus 0, slots 0..31. */
+/* PCI configuration via 0xCF8/0xCFC. Scan all buses so devices behind
+ * the CPU PCIe root complex (common on laptops) are visible. */
 #include "pci.h"
 
 static pci_dev_t devs[PCI_MAXDEV];
@@ -36,12 +37,15 @@ static void probe_func(u8 bus, u8 slot, u8 func) {
 int pci_scan(void) {
     if (scanned) return ndev;
     ndev = 0;
-    for (int s = 0; s < 32; s++) {
-        u32 hdr;
-        probe_func(0, (u8)s, 0);
-        hdr = pci_cfg_read(0, (u8)s, 0, 0x0C);
-        if (((hdr >> 16) & 0x80) == 0) continue;   /* single function */
-        for (int f = 1; f < 8; f++) probe_func(0, (u8)s, (u8)f);
+    for (int b = 0; b < 256 && ndev < PCI_MAXDEV; b++) {
+        for (int s = 0; s < 32 && ndev < PCI_MAXDEV; s++) {
+            u32 hdr;
+            probe_func((u8)b, (u8)s, 0);
+            hdr = pci_cfg_read((u8)b, (u8)s, 0, 0x0C);
+            if (((hdr >> 16) & 0x80) == 0) continue;   /* single function */
+            for (int f = 1; f < 8 && ndev < PCI_MAXDEV; f++)
+                probe_func((u8)b, (u8)s, (u8)f);
+        }
     }
     scanned = 1;
     return ndev;
