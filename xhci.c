@@ -4,6 +4,7 @@
 #include "xhci.h"
 #include "pci.h"
 #include "drivers.h"
+#include "heap.h"
 typedef unsigned long long u64;
 
 #define XCAP_CAPL 0x00
@@ -60,6 +61,9 @@ typedef struct { u32 a,b,c,d; } trb_t;
 static volatile u8 *mmio;
 static u32 op, db, rt;
 static int ready, maxports, maxslots, ctx_size=32;
+static int sp_count;
+static u64 *sp_table;
+static void *sp_pages[8];
 static int cmd_i, cmd_cycle=1;
 static int ev_i, ev_cycle=1;
 static u32 ev_dequeue;
@@ -280,8 +284,21 @@ int xhci_init(void){
     ctx_size=(hcc&(1u<<2))?64:32;
     slots=*(volatile u32 *)(mmio+XCAP_HCSP1)&0xff;
     ports=(*(volatile u32 *)(mmio+XCAP_HCSP1)>>24)&0xff;
+    hcs2=*(volatile u32 *)(mmio+0x08);
+    sp_count=(((hcs2>>21)&31)<<5)|((hcs2>>27)&31);
     maxslots=slots>8?8:(int)slots;maxports=ports>16?16:(int)ports;
-    if(!maxslots||!maxports)return -1;
+    if(!maxslots||!maxports||sp_count>8)return -1;
+    if(sp_count){
+        sp_table=(u64*)kmalloc_aligned((u32)sp_count*8,64);
+        if(!sp_table)return -1;
+        zero(sp_table,(u32)sp_count*8);
+        for(int i=0;i<sp_count;i++){
+            sp_pages[i]=kmalloc_aligned(4096,4096);
+            if(!sp_pages[i])return -1;
+            zero(sp_pages[i],4096);
+            sp_table[i]=ptr64(sp_pages[i]);
+        }
+    }
     db=op+*(volatile u32 *)(mmio+XCAP_DBOFF);
     rt=op+*(volatile u32 *)(mmio+XCAP_RTSOFF);
     if((*(volatile u32 *)(mmio+XOP_PAGESZ)&1)==0)return -1;
@@ -308,6 +325,7 @@ int xhci_init(void){
     if(wait32(op+XOP_CMD,CMD_HCRST,0,100000))return -1;
     if(wait32(op+XOP_STS,STS_CNR,0,100000))return -1;
     ring_init();zero(dcbaa,sizeof(dcbaa));zero(out_ctx,sizeof(out_ctx));
+    if(sp_count)dcbaa[0]=ptr64(sp_table);
     rw(op+XOP_DCBAAP,(u32)ptr64(dcbaa));
     rw(op+XOP_CRCR,(u32)ptr64(cmd_ring)|1);
     rw(op+XOP_CONFIG,(u32)maxslots);
