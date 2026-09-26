@@ -72,7 +72,6 @@ __attribute__((aligned(64))) static u8 in_ctx[4096];
 __attribute__((aligned(64))) static trb_t ctrl_rings[2][32];
 __attribute__((aligned(64))) static trb_t kbd_rings[2][32];
 __attribute__((aligned(64))) static trb_t mouse_rings[2][32];
-__attribute__((aligned(64))) static u8 ctrl_buf[256];
 
 typedef struct {
     int used, index, port, slot, speed;
@@ -139,11 +138,11 @@ static int command(u32 a,u32 b,u32 c,u32 d,u32 *slot){
     return status==COMP_SUCCESS?0:-1;
 }
 
-static void ctx32(u8 *base,int idx,u32 a,u32 b,u32 c,u32 d,u32 e){
+static void ctx32_unused(u8 *base,int idx,u32 a,u32 b,u32 c,u32 d,u32 e){
     u32 *p=(u32 *)(base+idx*32);
     p[0]=a;p[1]=b;p[2]=c;p[3]=d;p[4]=e;
 }
-static void ctxptr(u8 *base,int idx,u64 p){
+static void ctxptr_unused(u8 *base,int idx,u64 p){
     u32 *q=(u32 *)(base+idx*32);q[2]=(u32)p;q[3]=(u32)(p>>32);
 }
 static void make_link(trb_t *r){
@@ -154,7 +153,7 @@ static void ep_ring_reset(int index){
     for(int i=0;i<32;i++)trb_clear(&ctrl_rings[index][i]);
     make_link(ctrl_rings[index]);
 }
-static void ep_put(u32 a,u32 b,u32 c,u32 flags){
+static void ep_put_unused(u32 a,u32 b,u32 c,u32 flags){
     trb_t *t=&ep_ring[devs[0].ep_i];
     t->a=a;t->b=b;t->c=c;t->d=flags|((u32)devs[0].ep_cycle);
     devs[0].ep_i++;
