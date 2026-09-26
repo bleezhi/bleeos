@@ -270,7 +270,7 @@ static int find_xhci(pci_dev_t*out){
     return pci_find_class(0x0c0330,out);
 }
 int xhci_init(void){
-    pci_dev_t d;u32 bar,cap,hcc,slots,ports;
+    pci_dev_t d;u32 bar,cap,hcc,slots,ports,hcs2;
     if(ready)return 0;
     ndev=0;
     if(find_xhci(&d))return -1;
