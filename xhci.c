@@ -146,6 +146,13 @@ static void ctx32_unused(u8 *base,int idx,u32 a,u32 b,u32 c,u32 d,u32 e){
 static void ctxptr_unused(u8 *base,int idx,u64 p){
     u32 *q=(u32 *)(base+idx*32);q[2]=(u32)p;q[3]=(u32)(p>>32);
 }
+static int fs_interval(u8 binterval){
+    int v=binterval<1?1:binterval;
+    if(v>255)v=255;
+    int n=3;
+    while((1<<(n+1))<=v*8 && n<10)n++;
+    return n;
+}
 static void make_link(trb_t *r){
     r[31].a=(u32)ptr64(r);r[31].b=0;r[31].c=0;
     r[31].d=TRB_TYPE(6)|TRB_LINK_TOGGLE|1;
@@ -232,7 +239,7 @@ static int configure_ep(xdev_t*d,u8 epnum,u8 mps,u8 interval){
     e0[2]=(u32)ptr64(ctrl_rings[d->index])|1;e0[3]=(u32)(ptr64(ctrl_rings[d->index])>>32);e0[4]=8;
     u32 *ep=ctx(in_ctx,epnum);
     trb_t *ring=(epnum&1)?kbd_rings[d->index]:mouse_rings[d->index];
-    ep[0]=(3u<<1)|((u32)interval<<16);
+    ep[0]=(3u<<1)|((u32)fs_interval(interval)<<16);
     ep[1]=(((epnum&1)?7u:3u)<<3)|((u32)mps<<16);
     ep[2]=(u32)ptr64(ring)|1;ep[3]=(u32)(ptr64(ring)>>32);
     ep[4]=8;
@@ -273,7 +280,7 @@ int xhci_init(void){
     ctx_size=(hcc&(1u<<2))?64:32;
     slots=*(volatile u32 *)(mmio+XCAP_HCSP1)&0xff;
     ports=(*(volatile u32 *)(mmio+XCAP_HCSP1)>>24)&0xff;
-    maxslots=slots>8?8:(int)slots;maxports=ports>8?8:(int)ports;
+    maxslots=slots>8?8:(int)slots;maxports=ports>16?16:(int)ports;
     if(!maxslots||!maxports)return -1;
     db=op+*(volatile u32 *)(mmio+XCAP_DBOFF);
     rt=op+*(volatile u32 *)(mmio+XCAP_RTSOFF);
