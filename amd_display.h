@@ -12,5 +12,9 @@ int amd_display_present(void);
 int amd_display_is_dcn21(void);
 u32 amd_display_mmio(void);
 u16 amd_display_device(void);
+int amd_display_native_ready(void);
+int amd_display_edid_ready(void);
+int amd_display_mode_ready(void);
+int amd_display_hdmi_ready(void);
 
 #endif
