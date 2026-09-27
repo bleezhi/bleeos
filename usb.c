@@ -57,11 +57,12 @@ static int enumerate_port(int port) {
         if(l<2||pos+l>total)break;
         if(t==2&&l>=9)config=cfg[pos+5];
         if(t==4&&l>=9&&cfg[pos+5]==USB_CLASS_HID&&cfg[pos+6]==USB_HID_BOOT) {
-            int proto=cfg[pos+7],eps=cfg[pos+4],q=pos+l;
+            int proto=cfg[pos+7],q=pos+l;
             ifnum=cfg[pos+2];
-            for(int e=0;e<eps&&q+2<=total;e++) {
+            while(q+2<=total) {
                 int el=cfg[q],et=cfg[q+1];
                 if(el<2||q+el>total)break;
+                if(et==4||et==2)break;
                 if(et==5&&el>=7&&(cfg[q+2]&0x80)&&((cfg[q+3]&3)==3)) {
                     u8 ep=cfg[q+2]&15;
                     u16 mp=(u16)cfg[q+4]|((u16)cfg[q+5]<<8);

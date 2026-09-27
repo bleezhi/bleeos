@@ -41,7 +41,7 @@ ATA PIO driver (primary bus, LBA28, polled). The kernel reports a
 detected primary master at boot; `install` is a Debian-like TUI
 wizard (root only): welcome, hostname, root password, optional
 user, disk confirm, progress bar, reboot. It writes a universal
-image to the disk and verifies it: BIOS MBR + stage2 (288 sectors)
+image to the disk and verifies it: BIOS MBR + stage2 (320 sectors)
 plus a UEFI ESP (FAT16 with `BOOTX64.EFI` + kernel, built by
 `hdimg.c` — byte-identical to `tools/mkesp.py` output, checked by
 `tools/test_hdimg.sh`), so the disk boots on BIOS and UEFI alike.
@@ -68,11 +68,11 @@ vanish on reboot when booted from floppy/CD.
 Booting from hard disk (BIOS drive 0x80+, or a valid on-disk DB
 probed at UEFI boot) sets installed mode
 (`installed on HDD: users persist.` at boot) and the DB is kept on
-reserved HDD sectors (LBA 289..293, magic + checksums, past the OS
+reserved HDD sectors (LBA 321..325, magic + checksums, past the OS
 image): loaded into ramfs at boot, written back on every add/del/
 passwd/seed. Verified: useradd alice on HDD, reboot, alice logs in
 with an identical users list. The install drive is detected from
-the MBR's own boot_drive byte (linear 0x7D3B); the Makefile fails
+the MBR's own boot_drive byte (linear 0x7DA3); the Makefile fails
 the build if that byte moves.
 
 ## USB (`usb` command)
@@ -99,7 +99,7 @@ user-mode networking; `ping 10.0.2.2` answers. No DHCP/DNS/TCP yet.
 ## Kernel core (IDT, timer, heap, PCI)
 Interrupts are on: 8259 PIC remapped (IRQs at 32..47), PIT at
 100Hz driving a tick counter, heap allocator (56KB arena at
-0x70000, `mem` shows stats), and a PCI bus layer (table, BARs, IRQ
+0x78000, `mem` shows stats), and a PCI bus layer (table, BARs, IRQ
 lines) used by new code (UHCI stub migrated; e1000 predates it).
 Keyboard/mouse stay masked + polled; `sleep_ms` halts on ticks
 when interrupts are live, busy-waits during early boot, and falls

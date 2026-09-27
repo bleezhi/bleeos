@@ -21,13 +21,19 @@ extern u8 boot_drive_override;
 static int uefi_mode;
 static int uefi_inst;
 
+/* total usable RAM in KB (BIOS: MBR E820 sum; UEFI: loader-summed
+ * conventional memory; 0 = unknown). Read by the fetch command. */
+u32 g_ram_kb;
+
+/* 1 on UEFI boot (GOP text console); BIOS/VBE path otherwise. Used to
+ * guard features that assume the legacy boot environment. */
 int uefi_active(void) { return uefi_mode; }
 
 static void kernel_early(void) {
     {
         extern char __bss_end;
         ASSERT((u32)&__bss_end <= 0x60000u, "kernel too big for heap");
-        if (heap_init(0x70000u, 0x7E000u))
+        if (heap_init(0x78000u, 0x86000u))
             panic("heap init failed");
     }
     irq_init();
@@ -56,6 +62,7 @@ void uefi_main(void) {
     boot_drive_override = 0xE0;
     uefi_mode = 1;
     uefi_inst = (p->magic == UEFIPARAM_MAGIC && p->installed) ? 1 : 0;
+    g_ram_kb = (p->magic == UEFIPARAM_MAGIC) ? p->ram_kb : 0;
     {
         extern void boot_main(void);
         boot_main();
@@ -84,6 +91,7 @@ void kernel_main(const boot_info_t *info) {
     vga_clear();
     serial_init();
     kernel_early();
+    g_ram_kb = (info && info->magic == BOOT_MAGIC) ? info->ram_kb : 0;
     vga_setcolor(0x0B);
     klog("==============================\n"
          "  BleeOS 0.3 - 32-bit mode\n"

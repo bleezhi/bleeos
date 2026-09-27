@@ -14,13 +14,13 @@ OVMF ?= /usr/share/edk2-ovmf/x64/OVMF.4m.fd
 DISPLAY_BACKEND ?= $(if $(or $(DISPLAY),$(WAYLAND_DISPLAY)),sdl,none)
 
 # MBR loads this many sectors (must cover the whole stage2 binary)
-STAGE2_SECTORS=288
+STAGE2_SECTORS=320
 
 CFLAGS=-m32 -march=i386 -mno-mmx -mno-sse -mno-sse2 -ffreestanding -nostdlib -nostartfiles -nodefaultlibs \
        -fno-builtin -fno-stack-protector -fno-pie -no-pie \
        -Wall -Wextra -O2 -std=gnu11
 
-OBJS=kernel_entry.o drivers.o bootmenu.o shell.o kernel.o vbe.o gfx.o mouse.o wm.o apps.o login.o ata.o users.o uhci.o xhci.o usb.o tui.o pkg.o doom.o e1000.o net.o vt.o term.o irq.o irq_c.o heap.o pci.o amd_display.o fbcon.o hdimg.o
+OBJS=kernel_entry.o drivers.o bootmenu.o shell.o kernel.o vbe.o gfx.o mouse.o wm.o apps.o login.o ata.o users.o uhci.o xhci.o usb.o tui.o pkg.o doom.o e1000.o net.o vt.o term.o irq.o irq_c.o heap.o pci.o amd_display.o fbcon.o hdimg.o fetch.o
 # install blobs: boot.bin (MBR for HD targets) + BOOTX64.EFI (ESP for HD
 # targets), embedded as binary objects for the installer backend
 BOOTBINDS=bootbind.o loaderbind.o
@@ -29,8 +29,8 @@ all: os.img
 
 boot.bin: boot.asm
 	$(AS) -f bin boot.asm -o boot.bin
-	@od -A n -t x1 -v boot.bin | tr -d ' \n' | grep -q '88163b7d' || \
-		(echo "ERROR: boot_drive moved from 0x7D3B; update bootmenu.c"; exit 1)
+	@od -A n -t x1 -v boot.bin | tr -d ' \n' | grep -q '8816a37d' || \
+		(echo "ERROR: boot_drive moved from 0x7DA3; update bootmenu.c"; exit 1)
 
 kernel_entry.o: kernel_entry.asm
 	$(AS) -f elf32 kernel_entry.asm -o kernel_entry.o
@@ -110,6 +110,9 @@ fbcon.o: fbcon.c fbcon.h gfx.h drivers.h
 hdimg.o: hdimg.c hdimg.h drivers.h
 	$(CC) $(CFLAGS) -c hdimg.c -o hdimg.o
 
+fetch.o: fetch.c fetch.h drivers.h shell.h heap.h irq.h pci.h ata.h fbcon.h vbe.h
+	$(CC) $(CFLAGS) -c fetch.c -o fetch.o
+
 term.o: term.c wm.h gfx.h vt.h shell.h drivers.h
 	$(CC) $(CFLAGS) -c term.c -o term.o
 
@@ -167,6 +170,15 @@ run-usb: os.img
 		-monitor unix:/tmp/opencode/qemu-mon,server,nowait \
 		-qmp unix:/tmp/opencode/qmp.sock,server,nowait \
 		-device piix3-usb-uhci -device usb-kbd -device usb-mouse \
+		-drive file=os.img,format=raw,if=floppy -boot order=a,strict=on -net none
+
+# xHCI HID rig: qemu-xhci + USB keyboard/mouse. The xHCI driver
+# enumerates HID devices here; USB keys also reach the shell.
+run-xhci: os.img
+	$(QEMU) -machine accel=kvm:tcg -vga std -display none \
+		-monitor unix:/tmp/opencode/qemu-mon,server,nowait \
+		-qmp unix:/tmp/opencode/qmp.sock,server,nowait \
+		-device qemu-xhci -device usb-kbd -device usb-mouse \
 		-drive file=os.img,format=raw,if=floppy -boot order=a,strict=on -net none
 
 # HDD test rig: blank disk on IDE primary master. Boot the floppy,

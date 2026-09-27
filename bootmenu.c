@@ -122,6 +122,16 @@ static int menu_loop(char cmdlines[2][128]) {
     }
 }
 
+/* read a little-endian u32 from an absolute address. Takes the
+ * address as a value so GCC cannot "prove" -Warray-bounds on it. */
+static u32 abs_u32(u32 addr) {
+    u8 *p = (u8 *)addr;
+    u32 v = 0;
+    int i;
+    for (i = 0; i < 4; i++) v |= (u32)p[i] << (i * 8);
+    return v;
+}
+
 void boot_main(void) {
     /* BIOS drive number saved by the MBR at a fixed address
      * (MBR_BOOT_DRIVE in boot.asm, enforced by the Makefile).
@@ -130,7 +140,8 @@ void boot_main(void) {
     u8 mbr_dl;
     info.magic = BOOT_MAGIC;
     info.boot_sec = rtc_seconds();
-    mbr_dl = *(volatile u8 *)0x7D3B;
+    info.ram_kb = abs_u32(0x500u);   /* MBR E820 sum (0 = unknown) */
+    mbr_dl = *(volatile u8 *)0x7DA3;
     info.boot_drive = boot_drive_override != 0xFF ? boot_drive_override
                                                   : mbr_dl;
 

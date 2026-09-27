@@ -11,7 +11,7 @@
 #include "drivers.h"
 
 /* Keep STAGE2_SECTORS in sync with Makefile + boot.asm. */
-#define STAGE2_SECTORS 288
+#define STAGE2_SECTORS 320
 /* Keep the ESP geometry identical to tools/mkesp.py. */
 #define HDIMG_PART_LBA 2048u
 #define HDIMG_VOL_SECTORS 65536u

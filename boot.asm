@@ -8,7 +8,7 @@
 [BITS 16]
 [ORG 0x7C00]
 
-STAGE2_SECTORS equ 288
+STAGE2_SECTORS equ 320
 STAGE2_LBA     equ 1
 CHUNK_SECTORS  equ 32              ; 16KB per EDD call, segment-contained
 
@@ -25,6 +25,39 @@ start:
 
     mov si, msg_loading
     call print_string
+
+    ; --- RAM size via E820: total usable KB at 0x500 (0 = unknown).
+    ; The boot menu picks it up into boot_info for the kernel/fetch.
+    mov dword [0x500], 0
+    xor ebx, ebx                  ; continuation: 0 = first call
+    mov cx, 64                    ; entry cap
+.e820:
+    push cx
+    mov dword [0x600+20], 0   ; clear length-high: old BIOS may return <24B
+    mov eax, 0xE820
+    mov ecx, 24
+    mov edx, 0x534D4150           ; 'SMAP'
+    xor ax, ax
+    mov es, ax
+    mov edi, 0x600                ; scratch entry
+    int 0x15
+    pop cx
+    jc .e820_done
+    cmp eax, 0x534D4150
+    jne .e820_done
+    cmp dword [es:di+16], 1       ; type == usable RAM?
+    jne .e820_next
+    cmp dword [es:di+20], 0       ; length high != 0 (past 4GB)?
+    jne .e820_next
+    mov eax, [es:di+8]            ; length low (bytes)
+    shr eax, 10                   ; -> KB
+    add [0x500], eax
+.e820_next:
+    test ebx, ebx                 ; EBX == 0: last entry
+    jz .e820_done
+    dec cx
+    jnz .e820
+.e820_done:
 
     ; --- EDD availability? (AH=0x41, BX=0x55AA) ---
     mov ah, 0x41
@@ -155,7 +188,7 @@ msg_ok      db 'OK', 13, 10, 0
 msg_error   db 'Disk read error!', 13, 10, 0
 
 boot_drive db 0   ; ABI: kernel (bootmenu.c) reads BIOS DL from
-                  ; linear 0x7D3B. If this moves, update the address
+                  ; linear 0x7DA3. If this moves, update the address
                   ; there (the Makefile also fails the build).
 
 ; Disk Address Packet for EDD reads

@@ -3,6 +3,7 @@
 #include "uhci.h"
 #include "pci.h"
 #include "heap.h"
+#include "irq.h"
 #include "drivers.h"
 
 #define UHCI_CMD       0x00

@@ -9,7 +9,7 @@
 
 /* on-disk DB: past the OS image (MBR + STAGE2_SECTORS stage2).
  * Keep in sync with STAGE2_SECTORS (Makefile/boot.asm/hdimg.h). */
-#define UDISK_LBA (1 + 288)
+#define UDISK_LBA (1 + 320)
 #define UDISK_NSEC 5   /* header + passwd(2) + shadow(2) */
 static const char UMAGIC[8] = { 'B','L','E','E','U','S','E','R' };
 /* header: magic[8] ver[4] plen[4] slen[4] sum[4] hostname[32]

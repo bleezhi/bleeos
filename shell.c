@@ -14,6 +14,7 @@
 #include "e1000.h"
 #include "net.h"
 #include "heap.h"
+#include "fetch.h"
 
 /* ================= string helpers ================= */
 static void scpy(char *d, const char *s) { while ((*d++ = *s++)) ; }
@@ -555,6 +556,11 @@ static int b_ver(int argc, char **argv, const char *in) {
     sh_print("BleeOS 0.3.0 (i386 protected mode)\n");
     return 0;
 }
+static int b_fetch(int argc, char **argv, const char *in) {
+    (void)argc; (void)argv; (void)in;
+    fetch_run(sh_print);
+    return 0;
+}
 static int b_pwd(int argc, char **argv, const char *in) {
     (void)argc; (void)argv; (void)in;
     sh_print(cwd); sh_putc('\n');
@@ -918,6 +924,10 @@ static const char MAN_AAP[] =
     "Keyboard editor: arrows move, printable keys draw, Del erases.\n"
     "N/B change frames, D duplicates, C clears, P previews,\n"
     "S saves to /aap, L loads from /aap, Esc quits.\n";
+static const char MAN_FETCH[] =
+    "fetch - system info (logo + detected CPU/RAM/GPU/disk)\nUsage: fetch\n"
+    "Everything shown is probed live: CPUID brand/cache, TSC\n"
+    "frequency, RAM total, PCI display, ATA disk, uptime.\n";
 static const char MAN_GUI[] =
     "gui - graphical desktop\nUsage: gui\n"
     "Login screen (checks /etc/shadow), then 640x480 VBE desktop.\n"
@@ -980,7 +990,7 @@ static const char MAN_PKG[] =
     "Run installed scripts with `run /pkg/<name>/...`.\n";
 static const char MAN_MEM[] =
     "mem - heap statistics\nUsage: mem\n"
-    "Shows the kernel heap arena (56KB at 0x70000): total,\n"
+    "Shows the kernel heap arena (56KB at 0x78000): total,\n"
     "used, free and block count.\n";
 static const char MAN_SHELL[] =
     "Shell syntax: ' \" quotes, \\ escape, $VAR $? $$,\n"
@@ -1010,6 +1020,7 @@ static const cmd_t cmds[] = {
     {"whoami", "print user", MAN_WHOAMI, b_whoami},
     {"hostname", "show/set host", MAN_HOSTNAME, b_hostname},
     {"ver", "OS version", MAN_VER, b_ver},
+    {"fetch", "system info", MAN_FETCH, b_fetch},
     {"pwd", "working dir", MAN_PWD, b_pwd},
     {"ls", "list files", MAN_LS, b_ls},
     {"cd", "change dir", MAN_CD, b_cd},
@@ -1288,7 +1299,7 @@ static int b_install(int argc, char **argv, const char *in) {
          * verify passes must render from a snapshot, not live RAM */
         extern char __bss_end;
         u8 *snap = (u8 *)(((u32)&__bss_end + 0xFFFu) & ~0xFFFu);
-        if (snap + (u32)STAGE2_SECTORS * 512u >= (u8 *)0x70000u) {
+        if (snap + (u32)STAGE2_SECTORS * 512u >= (u8 *)0x78000u) {
             tui_msg("Error", "image too big for scratch");
             vga_clear();
             return 1;

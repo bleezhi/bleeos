@@ -137,7 +137,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *ST_) {
                 ((u64)info_buf[10] << 16) | ((u64)info_buf[11] << 24) |
                 ((u64)info_buf[12] << 32) | ((u64)info_buf[13] << 40) |
                 ((u64)info_buf[14] << 48) | ((u64)info_buf[15] << 56);
-        if (ksize == 0 || ksize > 0x24000) {   /* stage2 max, see Makefile */
+        if (ksize == 0 || ksize > 0x28000) {   /* stage2 max, see Makefile */
             fail("ERR: bad kernel.bin size");
             return 1;
         }
@@ -271,12 +271,13 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *ST_) {
             desc[2 + i] = (u8)(base >> (i * 8));
     }
 
-    /* --- exit boot services --- */
+    /* --- exit boot services (remember conventional RAM for fetch) --- */
     {
         UINTN mapSize = 0, key = 0, descSize = 0;
         u32 descVer = 0;
         u64 mapBuf = 0;
         UINTN mapPages = 0;
+        u64 ram_pages = 0;
         BS->GetMemoryMap(&mapSize, 0, &key, &descSize, &descVer);
         mapSize += 2 * 4096;
         mapPages = (mapSize + 4095) / 4096;
@@ -297,6 +298,18 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *ST_) {
                                    mapPages, &mapBuf);
             if (st) { fail("ERR: map buffer"); return 1; }
         }
+        /* sum free conventional RAM (type 7) from the final map */
+        if (descSize >= sizeof(EFI_MEMORY_DESCRIPTOR)) {
+            UINTN off, end = mapPages * 4096;
+            for (off = 0; off + sizeof(EFI_MEMORY_DESCRIPTOR) <= end;
+                 off += descSize) {
+                EFI_MEMORY_DESCRIPTOR *md =
+                    (EFI_MEMORY_DESCRIPTOR *)(mapBuf + off);
+                if (md->Type == 7)
+                    ram_pages += md->NumberOfPages;
+            }
+        }
+        param->ram_kb = (unsigned int)(ram_pages * 4u);
     }
 
     /* --- drop to 32-bit PM and enter the kernel. No returns. --- */

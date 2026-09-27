@@ -1,18 +1,44 @@
-/* Minimal xHCI host controller + USB2 HID support.
- * Polled, no interrupts/hotplug/hubs. DMA structures live in the
- * low kernel image so this 32-bit kernel can hand them to xHCI. */
+/* xHCI host controller + USB2 HID, recreated from scratch.
+ *
+ * Why: the previous driver rang doorbells and then timed out. Root
+ * causes found by reading it against the spec and the serial log
+ * (USBSTS stuck at 0x1000 = Host Controller Error):
+ *  1. Interrupt rings started with producer cycle 0 while the EP
+ *     context programmed DCS=1, so the xHC never fetched the first
+ *     transfer TRB. Every poll then waited on an event that could
+ *     never arrive. All producer rings now start at cycle 1.
+ *  2. GET_DESCRIPTOR setup packets had wValue bytes swapped
+ *     (type went in the index byte), so enumeration died on the
+ *     device descriptor.
+ *  3. Configure Endpoint left Context Entries at 1 while adding
+ *     DCI 3+ endpoints.
+ *  4. The HID poller never consumed non-matching events, so one
+ *     stray port-change event head-blocked the ring forever.
+ *  5. Control-ring link TRB cycle was never updated on wrap.
+ *
+ * Design: polled only (no MSI), one outstanding command at a time,
+ * one outstanding interrupt transfer per endpoint. Every init step
+ * checks the HCE bit so the serial log names the exact killer step
+ * on unfamiliar hardware. DMA structures live in low .bss so this
+ * 32-bit kernel can hand physical (=virtual, identity mapped)
+ * addresses to the controller.
+ */
 #include "xhci.h"
 #include "pci.h"
+#include "irq.h"
 #include "drivers.h"
 #include "heap.h"
 typedef unsigned long long u64;
 
+/* ---- capability registers (offsets from MMIO base) ---- */
 #define XCAP_CAPL 0x00
 #define XCAP_HCSP1 0x04
+#define XCAP_HCSP2 0x08
 #define XCAP_HCC1 0x10
 #define XCAP_DBOFF 0x14
 #define XCAP_RTSOFF 0x18
 
+/* ---- operational registers (offsets from op base) ---- */
 #define XOP_CMD 0x00
 #define XOP_STS 0x04
 #define XOP_PAGESZ 0x08
@@ -21,572 +47,1004 @@ typedef unsigned long long u64;
 #define XOP_CONFIG 0x38
 #define XOP_PORTS 0x400
 
-#define CMD_RS 0x00000001
-#define CMD_HCRST 0x00000002
-#define STS_HCH 0x00000001
-#define STS_CNR 0x00000800
+#define CMD_RS 0x00000001u
+#define CMD_HCRST 0x00000002u
+#define STS_HCH 0x00000001u
+#define STS_HCE 0x00001000u
+#define STS_CNR 0x00000800u
 
-#define PORT_CCS 0x00000001
-#define PORT_PED 0x00000002
-#define PORT_PR  0x00000010
-#define PORT_PP  0x00000200
-#define PORT_SPEED(x) (((x)>>10)&15)
-#define PORT_PRC 0x00200000
+/* ---- port status/control bits ---- */
+#define PORT_CCS 0x00000001u
+#define PORT_PED 0x00000002u
+#define PORT_PR 0x00000010u
+#define PORT_PP 0x00000200u
+#define PORT_PRC 0x00200000u
+#define PORT_SPEED(x) (((x) >> 10) & 15u)
 
+/* ---- TRB control field ---- */
 #define TRB_CYCLE 1u
-#define TRB_CHAIN (1u<<4)
-#define TRB_IOC (1u<<5)
-#define TRB_IDT (1u<<6)
-#define TRB_DIR_IN (1u<<16)
-#define TRB_TRT_OUT (2u<<16)
-#define TRB_TRT_IN (3u<<16)
-#define TRB_TYPE(x) ((u32)(x)<<10)
-#define TRB_LINK_TOGGLE 2u
-#define TRB_ENABLE_SLOT TRB_TYPE(9)
-#define TRB_ADDR_DEV TRB_TYPE(11)
-#define TRB_CONFIG_EP TRB_TYPE(12)
-#define TRB_EVAL_CONTEXT TRB_TYPE(13)
-#define TRB_SETUP TRB_TYPE(2)
-#define TRB_DATA TRB_TYPE(3)
-#define TRB_STATUS TRB_TYPE(4)
-#define TRB_NORMAL TRB_TYPE(1)
-#define TRB_COMPLETION 33
-#define TRB_TRANSFER 32
+#define TRB_CHAIN (1u << 4)
+#define TRB_IOC (1u << 5)
+#define TRB_IDT (1u << 6)
+#define TRB_DIR_IN (1u << 16)
+#define TRB_TRT_OUT (2u << 16)
+#define TRB_TRT_IN (3u << 16)
+#define TRB_TYPE(x) ((u32)(x) << 10)
+#define TRB_LINK_TC 2u
+#define TRB_T_SETUP TRB_TYPE(2)
+#define TRB_T_DATA TRB_TYPE(3)
+#define TRB_T_STATUS TRB_TYPE(4)
+#define TRB_T_NORMAL TRB_TYPE(1)
+#define TRB_T_LINK TRB_TYPE(6)
+#define TRB_T_NOOP TRB_TYPE(23)
+#define TRB_C_ENABLE_SLOT TRB_TYPE(9)
+#define TRB_C_ADDR_DEV TRB_TYPE(11)
+#define TRB_C_CONFIG_EP TRB_TYPE(12)
+#define TRB_C_EVAL_CTX TRB_TYPE(13)
+#define TRB_C_STOP_EP TRB_TYPE(15)
+#define TRB_C_SET_DEQ TRB_TYPE(16)
+#define EV_TRANSFER 32
+#define EV_COMMAND 33
+#define EV_PORT 34
 
-#define COMP_SUCCESS 1
-#define COMP_SHORT 13
+#define COMP_SUCCESS 1u
+#define COMP_SHORT 13u
 
-typedef struct { u32 a,b,c,d; } trb_t;
+/* endpoint context: DW0 interval/CErr, DW1 type/MPS */
+#define EP_CTX_CERR (3u << 1)
+#define EP_TYPE_CONTROL (4u << 3)
+#define EP_TYPE_INT_IN (7u << 3)
 
+typedef struct { u32 a, b, c, d; } trb_t;
+
+/* ---- controller state ---- */
 static volatile u8 *mmio;
 static u32 op, db, rt;
-static int ready, maxports, maxslots, ctx_size=32;
-static int sp_count;
-static u64 *sp_table;
-static void *sp_pages[8];
-static int cmd_i, cmd_cycle=1;
-static int ev_i, ev_cycle=1;
-static u32 ev_dequeue;
+static int ready, maxports, ctx_size = 32;
 
+/* ---- DMA areas (low .bss, 64-byte aligned) ---- */
+#define CMD_N 16
+#define EV_N 64
+#define EP_N 16
 __attribute__((aligned(64))) static u64 dcbaa[256];
-__attribute__((aligned(64))) static trb_t cmd_ring[32];
-__attribute__((aligned(64))) static trb_t event_ring[64];
+__attribute__((aligned(64))) static trb_t cmd_ring[CMD_N + 1];
+__attribute__((aligned(64))) static trb_t event_ring[EV_N];
 __attribute__((aligned(64))) static u64 erst[2];
-__attribute__((aligned(64))) static u8 out_ctx[2][4096];
 __attribute__((aligned(64))) static u8 in_ctx[4096];
-__attribute__((aligned(64))) static trb_t ctrl_rings[2][32];
-__attribute__((aligned(64))) static trb_t kbd_rings[2][32];
-__attribute__((aligned(64))) static trb_t mouse_rings[2][32];
+__attribute__((aligned(64))) static u8 out_ctx[2][4096];
+__attribute__((aligned(64))) static trb_t ep0_ring[2][EP_N + 1];
+__attribute__((aligned(64))) static trb_t kbd_ring[2][EP_N + 1];
+__attribute__((aligned(64))) static trb_t mse_ring[2][EP_N + 1];
+
+/* ---- producer ring cursor ---- */
+typedef struct {
+    trb_t *t;
+    int n, enq, cyc;
+} ring_t;
+static int ev_idx, ev_cyc = 1;
 
 typedef struct {
     int used, index, port, slot, speed;
-    u8 mps, kbd_ep, mouse_ep, kbd_mps, mouse_mps;
-    int kbd_toggle, mouse_toggle;
-    u8 prev[6], mod;
-    int ep_i, ep_cycle;
-    int k_i,k_cycle,m_i,m_cycle;
+    u8 mps;
+    int kbd_dci, mse_dci;     /* 0 = not configured */
+    u8 kbd_mps, mse_mps;
+    ring_t ep0, kbd, mse;
+    u8 prev[6], mod, caps;
 } xdev_t;
 static xdev_t devs[2];
 static int ndev;
+static int next_usb_addr = 1;   /* USB device addresses: 1, 2, ... */
 static u8 kbuf[2][8], mbuf[2][4];
-static int k_pending[2], m_pending[2];
+static int k_queued[2], m_queued[2];
+static u32 k_last[2], m_last[2];   /* TRB phys addr of outstanding xfer */
+static void *sp_pages[8];
 
-static inline u32 rr(u32 o){ return *(volatile u32 *)(mmio+o); }
-static inline void rw(u32 o,u32 v){ *(volatile u32 *)(mmio+o)=v; }
-static inline void rw64(u32 o,u64 v){ rw(o,(u32)v); rw(o+4,(u32)(v>>32)); }
-static void zero(void *p,u32 n){u8 *q=p;while(n--)*q++=0;}
-static void status_ok(const char *s){klog("[ OK ] xHCI: ");klog(s);klog("\n");}
-static void status_warn(const char *s){klog("[ !!! ] xHCI: ");klog(s);klog("\n");}
-static void status_err(const char *s){klog("[ ERR ] xHCI: ");klog(s);klog("\n");}
-static void diag_u32(const char *name,u32 v){
-    char b[12]; klog("[ !!! ] xHCI: "); klog(name); klog("="); klog(utoa10(v,b)); klog("\n");
+/* ---- MMIO + misc helpers ---- */
+static inline u32 rr(u32 o) { return *(volatile u32 *)(mmio + o); }
+static inline void rw(u32 o, u32 v) { *(volatile u32 *)(mmio + o) = v; }
+static inline void rw64(u32 o, u64 v) {
+    rw(o, (u32)v);
+    rw(o + 4, (u32)(v >> 32));
 }
-static void command_diag(void){
-    diag_u32("USBSTS",rr(op+XOP_STS));
-    diag_u32("USBCMD",rr(op+XOP_CMD));
-    diag_u32("CONFIG",rr(op+XOP_CONFIG));
-    diag_u32("CRCR_lo",rr(op+XOP_CRCR));
-    diag_u32("CRCR_hi",rr(op+XOP_CRCR+4));
-    diag_u32("DB0",rr(db));
-    diag_u32("ERSTSZ",rr(rt+0x28));
-    diag_u32("ERSTBA_lo",rr(rt+0x30));
-    diag_u32("ERSTBA_hi",rr(rt+0x34));
-    diag_u32("ERDP_lo",rr(rt+0x38));
-    diag_u32("ERDP_hi",rr(rt+0x3c));
-    diag_u32("CMD_TRB_a",cmd_ring[cmd_i].a);
-    diag_u32("CMD_TRB_b",cmd_ring[cmd_i].b);
-    diag_u32("CMD_TRB_c",cmd_ring[cmd_i].c);
-    diag_u32("CMD_TRB_d",cmd_ring[cmd_i].d);
-    diag_u32("EV_TRB_d",event_ring[ev_i].d);
+static void zero(void *p, u32 n) {
+    u8 *q = p;
+    while (n--) *q++ = 0;
 }
-
-static u64 ptr64(const void *p){return (u64)(u32)p;}
-static u32 *ctx(u8 *base,int idx){return (u32 *)(base+idx*ctx_size);}
-
-static int wait32(u32 off,u32 mask,u32 want,u32 loops){
-    while(loops--) if((rr(off)&mask)==want) return 0;
-    return -1;
+static u64 phys(const void *p) { return (u64)(u32)p; }
+static void hex8(u32 v, char *o) {
+    static const char *h = "0123456789ABCDEF";
+    for (int i = 0; i < 8; i++) o[i] = h[(v >> (28 - i * 4)) & 15];
+    o[8] = 0;
 }
-static void trb_clear(trb_t *t){t->a=t->b=t->c=t->d=0;}
-static void ring_init(void){
-    for(int i=0;i<32;i++)trb_clear(&cmd_ring[i]);
-    cmd_ring[31].a=(u32)ptr64(cmd_ring);
-    cmd_ring[31].d=TRB_TYPE(6)|TRB_LINK_TOGGLE|1;
-    for(int i=0;i<64;i++)trb_clear(&event_ring[i]);
-    cmd_i=0;cmd_cycle=1;ev_i=0;ev_cycle=1;
+static void xlog(const char *s) { klog("[xhci] "); klog(s); klog("\n"); }
+static void xlogv(const char *name, u32 v) {
+    char b[12];
+    klog("[xhci] ");
+    klog(name);
+    klog("=0x");
+    hex8(v, b);
+    klog(b);
+    klog("\n");
 }
-static void cmd_put(u32 a,u32 b,u32 c,u32 d){
-    trb_t *t=&cmd_ring[cmd_i];
-    t->a=a;t->b=b;t->c=c;t->d=(d&~1u)|(u32)cmd_cycle;
-    cmd_i++;
-    if(cmd_i==31){cmd_ring[31].d=TRB_TYPE(6)|TRB_LINK_TOGGLE|(u32)cmd_cycle;cmd_i=0;cmd_cycle^=1;}
-    rw(db,0);
-}
-static int event_wait(u32 type,u32 *slot,u32 *status,u32 timeout){
-    while(timeout--){
-        trb_t *e=&event_ring[ev_i];
-        if((e->d&1u)!=((u32)ev_cycle)) { sleep_ms(1); continue; }
-        u32 et=(e->d>>10)&63;
-        u32 st=e->c;
-        u32 sl=e->d>>24;
-        ev_i++;
-        if(ev_i==64){ev_i=0;ev_cycle^=1;}
-        ev_dequeue=(u32)ptr64(&event_ring[ev_i]);
-        rw(rt+0x38,ev_dequeue|8);
-        if(et==type){
-            if(slot)*slot=sl;
-            if(status)*status=(st>>24)&255;
-            return 0;
-        }
-        /* Ignore port-change and other asynchronous events. */
-    }
-    return -1;
-}
-static int command(u32 a,u32 b,u32 c,u32 d,u32 *slot){
-    u32 status=0;
-    if(d==TRB_ENABLE_SLOT){
-        status_ok("Enable Slot: command ring state");
-        command_diag();
-    }
-    cmd_put(a,b,c,d);
-    if(d==TRB_ENABLE_SLOT){
-        status_ok("Enable Slot: doorbell rung");
-        command_diag();
-    }
-    if(event_wait(TRB_COMPLETION,slot,&status,500)){
-        status_err("command completion timeout");
-        if(d==TRB_ENABLE_SLOT)command_diag();
-        return -1;
-    }
-    if(status!=COMP_SUCCESS){
-        char b[12];
-        klog("[ ERR ] xHCI: command completion code=");
-        klog(utoa10(status,b));
+/* 0 ok: controller not reporting Host Controller Error */
+static int hce_check(const char *step) {
+    if (rr(op + XOP_STS) & STS_HCE) {
+        klog("[xhci] HCE after ");
+        klog(step);
         klog("\n");
         return -1;
     }
     return 0;
 }
-
-static void ctx32_unused(u8 *base,int idx,u32 a,u32 b,u32 c,u32 d,u32 e){
-    u32 *p=(u32 *)(base+idx*32);
-    p[0]=a;p[1]=b;p[2]=c;p[3]=d;p[4]=e;
-}
-static void ctxptr_unused(u8 *base,int idx,u64 p){
-    u32 *q=(u32 *)(base+idx*32);q[2]=(u32)p;q[3]=(u32)(p>>32);
-}
-static int fs_interval(u8 binterval){
-    int v=binterval<1?1:binterval;
-    if(v>255)v=255;
-    int n=3;
-    while((1<<(n+1))<=v*8 && n<10)n++;
-    return n;
-}
-static void make_link(trb_t *r){
-    r[31].a=(u32)ptr64(r);r[31].b=0;r[31].c=0;
-    r[31].d=TRB_TYPE(6)|TRB_LINK_TOGGLE|1;
-}
-static void ep_ring_reset(int index){
-    for(int i=0;i<32;i++)trb_clear(&ctrl_rings[index][i]);
-    make_link(ctrl_rings[index]);
-}
-static int xfer_wait(u32 slot,u32 *actual){
-    u32 status=0;
-    int timeout=500;
-    while(timeout--){
-        trb_t *e=&event_ring[ev_i];
-        if((e->d&1u)!=((u32)ev_cycle)){ sleep_ms(1); continue; }
-        u32 et=(e->d>>10)&63;
-        u32 sl=e->d>>24;
-        u32 epid=(e->d>>16)&31;
-        if(et!=TRB_TRANSFER || sl!=slot || epid!=1){
-            ev_i++; if(ev_i==64){ev_i=0;ev_cycle^=1;}
-            ev_dequeue=(u32)ptr64(&event_ring[ev_i]); rw(rt+0x38,ev_dequeue|8);
-            continue;
-        }
-        status=(e->c>>24)&255;
-        ev_i++; if(ev_i==64){ev_i=0;ev_cycle^=1;}
-        ev_dequeue=(u32)ptr64(&event_ring[ev_i]); rw(rt+0x38,ev_dequeue|8);
-        if(actual)*actual=0;
-        return (status==COMP_SUCCESS||status==COMP_SHORT)?0:-1;
-    }
+static int wait32(u32 off, u32 mask, u32 want, u32 loops) {
+    while (loops--)
+        if ((rr(off) & mask) == want)
+            return 0;
     return -1;
 }
 
-static int control_x(xdev_t *d,const u8 setup[8],void *buf,int len,int in){
-    trb_t *t;
-    u64 bp=ptr64(buf);
-    int i=d->ep_i, cyc=d->ep_cycle;
-    u32 trt=in?TRB_TRT_IN:(len?TRB_TRT_OUT:0);
-    /* Setup TRB uses immediate 8-byte USB setup data, not a pointer. */
-    t=&ctrl_rings[d->index][i];
-    t->a=(u32)setup[0]|((u32)setup[1]<<8)|((u32)setup[2]<<16)|((u32)setup[3]<<24);
-    t->b=(u32)setup[4]|((u32)setup[5]<<8)|((u32)setup[6]<<16)|((u32)setup[7]<<24);
-    t->c=8;
-    t->d=TRB_SETUP|TRB_IDT|(len?TRB_CHAIN:0)|trt|(u32)cyc;
-    i++;
-    if(len){
-        t=&ctrl_rings[d->index][i];t->a=(u32)bp;t->b=(u32)(bp>>32);t->c=(u32)len;
-        t->d=TRB_DATA|(in?TRB_DIR_IN:0)|TRB_CHAIN|(u32)cyc;i++;
+/* ---- producer ring ops (cycle discipline: start 1, link updated) ---- */
+static void ring_reset(ring_t *r, trb_t *t, int n) {
+    for (int i = 0; i <= n; i++) {
+        t[i].a = t[i].b = t[i].c = t[i].d = 0;
     }
-    t=&ctrl_rings[d->index][i];t->a=t->b=0;t->c=0;
-    t->d=TRB_STATUS|(!in?TRB_DIR_IN:0)|TRB_IOC|(u32)cyc;
-    i++;
-    d->ep_i=i;if(i==31){d->ep_i=0;d->ep_cycle^=1;}
-    rw(db+d->slot*4,1);
-    return xfer_wait(d->slot,0);
+    t[n].a = (u32)phys(t);
+    t[n].b = 0;
+    t[n].c = 0;
+    t[n].d = TRB_T_LINK | TRB_LINK_TC | 1u;
+    r->t = t;
+    r->n = n;
+    r->enq = 0;
+    r->cyc = 1;
 }
-static int getdesc(xdev_t*d,u8 type,void*buf,int len){
-    u8 s[8]={0x80,6,type,0,0,0,(u8)len,(u8)(len>>8)};
-    return control_x(d,s,buf,len,1);
+/* TEMPORARY EXPERIMENT (revert after test): run interrupt rings at
+ * producer cycle 0 (DCS=0) to test whether QEMU's per-EP expected
+ * cycle is stuck at 0 for reconfigured EPs (matching cyc=1 works
+ * for SeaBIOS-fresh EPs and for our EP0, but not our EP3). */
+static void ring_reset0(ring_t *r, trb_t *t, int n) {
+    ring_reset(r, t, n);
+    r->cyc = 0;
+    r->t[n].d = TRB_T_LINK | TRB_LINK_TC;
 }
-static int setcfg(xdev_t*d,u8 cfg){
-    u8 s[8]={0,9,cfg,0,0,0,0,0};
-    return control_x(d,s,0,0,0);
+static trb_t *ring_put(ring_t *r, u32 a, u32 b, u32 c, u32 d) {
+    trb_t *t = &r->t[r->enq];
+    t->a = a;
+    t->b = b;
+    t->c = c;
+    t->d = (d & ~1u) | (u32)r->cyc;
+    r->enq++;
+    if (r->enq == r->n) {
+        r->t[r->n].d = TRB_T_LINK | TRB_LINK_TC | (u32)r->cyc;
+        r->enq = 0;
+        r->cyc ^= 1;
+    }
+    return t;
 }
-static int setproto(xdev_t*d,u8 iface){
-    u8 s[8]={0x21,11,0,0,iface,0,0,0};
-    return control_x(d,s,0,0,0);
+
+/* ---- event pump: ALWAYS consumes; returns 1 on wanted event ---- */
+static void erdp_update(void) {
+    /* NOTE: no EHB bit (bit 3). SeaBIOS programs ERDP with EHB=0 and
+     * its completions flow; with EHB=1 set here, nothing ever posted. */
+    rw64(rt + 0x38, phys(&event_ring[ev_idx]));
 }
-static int enable_slot(int *slot){
-    u32 s=0;
-    if(command(0,0,0,TRB_ENABLE_SLOT, &s))return -1;
-    if(!s)return -1;*slot=(int)s;return 0;
-}
-static int address_device(xdev_t*d){
-    u32 *ic=(u32 *)in_ctx;
-    zero(in_ctx,2048);
-    ic[1]=(1u<<0)|(1u<<1);
-    u32 *sc=ctx(in_ctx,1), *ep=ctx(in_ctx,2);
-    sc[0]=((u32)d->speed<<20)|(1u<<27);
-    sc[1]=(u32)d->port<<16;
-    ep[0]=(3u<<16); /* interval 0, CErr=3 */
-    ep[1]=(4u<<3)|((u32)d->mps<<16);
-    ep[2]=(u32)ptr64(ctrl_rings[d->index])|1;
-    ep[3]=(u32)(ptr64(ctrl_rings[d->index])>>32);
-    ep[4]=8;
-    dcbaa[d->slot]=(u64)ptr64(out_ctx[d->index]);
-    u32 st=0;
-    if(command((u32)ptr64(in_ctx),(u32)(ptr64(in_ctx)>>32),0,
-               TRB_ADDR_DEV|((u32)d->slot<<24),&st))return -1;
-    return 0;
-}
-static int configure_ep(xdev_t*d,u8 epnum,u8 mps,u8 interval){
-    zero(in_ctx,2048);
-    u32 *ic=(u32 *)in_ctx;
-    ic[1]=(1u<<0)|(1u<<1)|(1u<<epnum);
-    u32 *sc=ctx(in_ctx,1);
-    sc[0]=((u32)d->speed<<20)|(1u<<27);
-    sc[1]=(u32)d->port<<16;
-    u32 *e0=ctx(in_ctx,2);
-    e0[0]=3u<<16;e0[1]=(4u<<3)|((u32)d->mps<<16);
-    e0[2]=(u32)ptr64(ctrl_rings[d->index])|1;e0[3]=(u32)(ptr64(ctrl_rings[d->index])>>32);e0[4]=8;
-    u32 *ep=ctx(in_ctx,epnum);
-    trb_t *ring=(epnum&1)?kbd_rings[d->index]:mouse_rings[d->index];
-    ep[0]=(3u<<1)|((u32)fs_interval(interval)<<16);
-    /* xHCI endpoint type: 3 = interrupt IN, 7 = interrupt OUT. */
-    ep[1]=(((epnum&1)?3u:7u)<<3)|((u32)mps<<16);
-    ep[2]=(u32)ptr64(ring)|1;ep[3]=(u32)(ptr64(ring)>>32);
-    ep[4]=8;
-    return command((u32)ptr64(in_ctx),(u32)(ptr64(in_ctx)>>32),0,
-                   TRB_CONFIG_EP|((u32)d->slot<<24),0);
-}
-static int port_reset(int p,int*speed){
-    volatile u32 *ps=(volatile u32 *)(mmio+op+XOP_PORTS+p*0x10);
-    u32 v=*ps;
-    if(!(v&PORT_CCS))return -1;
-    if(!(v&PORT_PP))*ps=v|PORT_PP;
-    /* USB2 port reset: wait for the reset-change event, acknowledge it,
-     * then require the port to become enabled before enumeration. */
-    v=*ps;*ps=v|PORT_PR;
-    for(int i=0;i<100;i++){sleep_ms(1);v=*ps;if(v&PORT_PRC)break;}
-    if(!(v&PORT_PRC))return -1;
-    *ps=v|PORT_PRC;
-    for(int i=0;i<100;i++){sleep_ms(1);v=*ps;if(v&PORT_PED)break;}
-    if(!(v&PORT_PED))return -1;
-    v=*ps;
-    if(speed)*speed=PORT_SPEED(v);
-    return 0;
-}
-static int find_xhci(pci_dev_t*out){
-    /* Renoir/Cezanne/Barcelo USB 3.1 controllers use 1022:1639.
-     * Keep the class-code fallback so other xHCI controllers can work too. */
-    if (pci_find(0x1022,0x1639,out)==0)
+static int ev_next(u32 *type, u32 *slot, u32 *dci, u32 *code) {
+    trb_t *e = &event_ring[ev_idx];
+    if ((e->d & 1u) != (u32)ev_cyc)
         return 0;
-    return pci_find_class(0x0c0330,out);
-}
-int xhci_init(void){
-    pci_dev_t d;u32 bar,cap,hcc,slots,ports,hcs2;
-    if(ready)return 0;
-    ndev=0;
-    if(find_xhci(&d))return -1;
-    bar=d.bars[0];
-    if(!(bar&1)&&((bar&6)==4) && d.bars[1]) return -1; /* 64-bit BAR above 32-bit address space */
-    bar=pci_bar_addr(&d,0);if(!bar)return -1;
-    pci_set_cmd(&d,0x06);
-    mmio=(volatile u8 *)(u32)bar;
-    cap=mmio[0];op=cap;
-    hcc=*(volatile u32 *)(mmio+XCAP_HCC1);
-    ctx_size=(hcc&(1u<<2))?64:32;
-    slots=*(volatile u32 *)(mmio+XCAP_HCSP1)&0xff;
-    ports=(*(volatile u32 *)(mmio+XCAP_HCSP1)>>24)&0xff;
-    hcs2=*(volatile u32 *)(mmio+0x08);
-    sp_count=(((hcs2>>21)&31)<<5)|((hcs2>>27)&31);
-    maxslots=slots>8?8:(int)slots;maxports=ports>16?16:(int)ports;
-    if(!maxslots||!maxports||sp_count>8)return -1;
-    if(sp_count){
-        sp_table=(u64*)kmalloc_aligned((u32)sp_count*8,64);
-        if(!sp_table)return -1;
-        zero(sp_table,(u32)sp_count*8);
-        for(int i=0;i<sp_count;i++){
-            sp_pages[i]=kmalloc_aligned(4096,4096);
-            if(!sp_pages[i])return -1;
-            zero(sp_pages[i],4096);
-            sp_table[i]=ptr64(sp_pages[i]);
-        }
+    u32 d = e->d, c = e->c;
+    ev_idx++;
+    if (ev_idx == EV_N) {
+        ev_idx = 0;
+        ev_cyc ^= 1;
     }
-    db=op+*(volatile u32 *)(mmio+XCAP_DBOFF);
-    rt=op+*(volatile u32 *)(mmio+XCAP_RTSOFF);
-    if((*(volatile u32 *)(mmio+XOP_PAGESZ)&1)==0)return -1;
-    /* Hand ownership to the OS when the legacy BIOS capability exists. */
-    u32 ext=(hcc>>16)*4;
-    while(ext){
-        u32 v=*(volatile u32 *)(mmio+ext);
-        u8 id=v&0xff;
-        u8 next=(v>>8)&0xff;
-        if(id==1){
-            v|=(1u<<24);
-            *(volatile u32 *)(mmio+ext)=v;
-            for(int i=0;i<100000;i++){
-                v=*(volatile u32 *)(mmio+ext);
-                if(!(v&(1u<<16)))break;
-            }
+    erdp_update();
+    if (type)
+        *type = (d >> 10) & 63u;
+    if (slot)
+        *slot = d >> 24;
+    if (dci)
+        *dci = (d >> 16) & 31u;
+    if (code)
+        *code = c >> 24;
+    return 1;
+}
+/* wait for a command completion whose TRB pointer matches ours */
+static int cmd_wait(trb_t *t, u32 *slot) {
+    u32 want = (u32)phys(t);
+    for (int i = 0; i < 500; i++) {
+        u32 type, sl, dc, code;
+        if (!ev_next(&type, &sl, &dc, &code)) {
+            sleep_ms(1);
+            continue;
+        }
+        if (type != EV_COMMAND)
+            continue;   /* port-change etc: consumed, ignored */
+        trb_t *e = &event_ring[(ev_idx + EV_N - 1) % EV_N];
+        if (e->a != want)
+            continue;   /* stale completion, keep waiting */
+        if (code != COMP_SUCCESS) {
+            char b[12];
+            klog("[xhci] command completion code=");
+            klog(utoa10(code, b));
+            klog("\n");
+            return -1;
+        }
+        if (slot)
+            *slot = sl;
+        return 0;
+    }
+    xlog("command completion timeout");
+    return -1;
+}
+static int command(u32 a, u32 b, u32 c, u32 d, u32 *slot) {
+    static ring_t cr;
+    static int cr_init;
+    trb_t *t;
+    if (!cr_init) {
+        ring_reset(&cr, cmd_ring, CMD_N);
+        cr_init = 1;
+    }
+    t = ring_put(&cr, a, b, c, d);
+    rw(db, 0);
+    return cmd_wait(t, slot);
+}
+/* wait for a transfer event on (slot,dci) for OUR trb (pointer
+ * match: stale events from previous owners share slots/DCIs) */
+static int xfer_poll(u32 slot, u32 dci, u32 want, u32 *code) {
+    u32 type, sl, dc, cc;
+    trb_t *e;
+    if (!ev_next(&type, &sl, &dc, &cc))
+        return 0;
+    if (type != EV_TRANSFER || sl != slot || dc != dci)
+        return 0;   /* consumed and ignored */
+    e = &event_ring[(ev_idx + EV_N - 1) % EV_N];
+    if (e->a != want)
+        return 0;   /* not our TRB (stale); already consumed */
+    if (code)
+        *code = cc;
+    return 1;
+}
+/* blocking variant used during enumeration */
+static int xfer_wait(u32 slot, u32 dci, u32 want) {
+    for (int i = 0; i < 500; i++) {
+        u32 code = 0;
+        if (xfer_poll(slot, dci, want, &code))
+            return (code == COMP_SUCCESS || code == COMP_SHORT) ? 0 : -1;
+        sleep_ms(1);
+    }
+    xlog("transfer completion timeout");
+    return -1;
+}
+
+/* ---- input/output contexts ---- */
+static u32 *ictx(int idx) { return (u32 *)(in_ctx + idx * (u32)ctx_size); }
+static void ctx_wr(int idx, u32 w0, u32 w1, u64 ptr, u32 w4) {
+    u32 *p = ictx(idx);
+    p[0] = w0;
+    p[1] = w1;
+    p[2] = (u32)ptr;
+    p[3] = (u32)(ptr >> 32);
+    p[4] = w4;
+}
+
+/* ---- control transfer on EP0 (DCI 1), correct setup byte order ---- */
+static int control_x(xdev_t *d, u8 rt_, u8 req, u16 val, u16 idx, void *buf,
+                     int len, int in) {
+    u8 setup[8];
+    u64 bp = phys(buf);
+    u32 sphys;
+    setup[0] = rt_;
+    setup[1] = req;
+    setup[2] = (u8)val;
+    setup[3] = (u8)(val >> 8);
+    setup[4] = (u8)idx;
+    setup[5] = (u8)(idx >> 8);
+    setup[6] = (u8)len;
+    setup[7] = (u8)(len >> 8);
+    {
+        u32 trt = in ? TRB_TRT_IN : (len ? TRB_TRT_OUT : 0);
+        trb_t *t = ring_put(&d->ep0,
+                            (u32)setup[0] | ((u32)setup[1] << 8) |
+                                ((u32)setup[2] << 16) | ((u32)setup[3] << 24),
+                            (u32)setup[4] | ((u32)setup[5] << 8) |
+                                ((u32)setup[6] << 16) | ((u32)setup[7] << 24),
+                            8, TRB_T_SETUP | TRB_IDT | TRB_CHAIN | trt);
+        (void)t;
+        if (len)
+            ring_put(&d->ep0, (u32)bp, (u32)(bp >> 32), (u32)len,
+                     TRB_T_DATA | (in ? TRB_DIR_IN : 0) | TRB_CHAIN);
+        sphys = (u32)phys(&d->ep0.t[d->ep0.enq]);
+        ring_put(&d->ep0, 0, 0, 0,
+                 TRB_T_STATUS | (in ? 0 : TRB_DIR_IN) | TRB_IOC);
+    }
+    rw(db + (u32)d->slot * 4u, 1u);
+    return xfer_wait((u32)d->slot, 1u, sphys);
+}
+static int getdesc(xdev_t *d, u8 type, u8 idx, void *buf, int len) {
+    return control_x(d, 0x80, 6, (u16)(((u16)type << 8) | idx), 0, buf, len,
+                     1);
+}
+static int setcfg(xdev_t *d, u8 cfg) {
+    return control_x(d, 0, 9, cfg, 0, 0, 0, 0);
+}
+static int setproto(xdev_t *d, u8 iface) {
+    return control_x(d, 0x21, 11, 0, iface, 0, 0, 0);
+}
+
+/* ---- device commands ---- */
+static int enable_slot(int *slot) {
+    u32 s = 0;
+    if (command(0, 0, 0, TRB_C_ENABLE_SLOT, &s))
+        return -1;
+    if (!s)
+        return -1;
+    *slot = (int)s;
+    return 0;
+}
+static int address_device(xdev_t *d, int usb_addr) {
+    u32 st = 0;
+    zero(in_ctx, sizeof(in_ctx));
+    {
+        u32 *ic = (u32 *)in_ctx;
+        ic[1] = (1u << 0) | (1u << 1);   /* Add slot + EP0 */
+    }
+    /* DW1 low byte = USB device address (software-assigned; leaving 0
+     * keeps interrupt transfers unroutable at the device model) */
+    ctx_wr(1, ((u32)d->speed << 20) | (1u << 27),
+           ((u32)d->port << 16) | (u32)usb_addr, 0, 0);
+    ctx_wr(2, EP_CTX_CERR, EP_TYPE_CONTROL | ((u32)d->mps << 16),
+           phys(d->ep0.t) | 1u, 8);
+    dcbaa[d->slot] = phys(out_ctx[d->index]);
+    if (command((u32)phys(in_ctx), (u32)(phys(in_ctx) >> 32), 0,
+                TRB_C_ADDR_DEV | ((u32)d->slot << 24), &st))
+        return -1;
+    return 0;
+}
+static int eval_ep0(xdev_t *d) {
+    zero(in_ctx, sizeof(in_ctx));
+    {
+        u32 *ic = (u32 *)in_ctx;
+        ic[1] = 1u << 1;                 /* Add EP0 only */
+    }
+    ctx_wr(2, EP_CTX_CERR, EP_TYPE_CONTROL | ((u32)d->mps << 16),
+           phys(d->ep0.t) | 1u, 8);
+    return command((u32)phys(in_ctx), (u32)(phys(in_ctx) >> 32), 0,
+                   TRB_C_EVAL_CTX | ((u32)d->slot << 24), 0);
+}
+/* FS/LS bInterval (1..255ms) -> xHCI Interval field */
+static int fs_interval(u8 binterval) {
+    int v = binterval < 1 ? 1 : binterval, n = 3;
+    if (v > 255)
+        v = 255;
+    while ((1 << (n + 1)) <= v * 8 && n < 10) n++;
+    return n;
+}
+/* ---- port reset ---- */
+static int port_reset(int p, int *speed) {
+    volatile u32 *ps = (volatile u32 *)(mmio + op + XOP_PORTS + p * 0x10);
+    u32 v = *ps;
+    if (!(v & PORT_CCS))
+        return -1;
+    if (!(v & PORT_PP)) {
+        *ps = v | PORT_PP;
+        sleep_ms(10);
+    }
+    /* RMW like Linux: PED/PP preserved; a stale PRC clears here and the
+     * loop below waits for the fresh one this reset generates. */
+    *ps = v | PORT_PR;
+    for (int i = 0; i < 100; i++) {
+        sleep_ms(1);
+        v = *ps;
+        if (v & PORT_PRC)
             break;
-        }
-        if(!next)break;ext+=next*4;
     }
-    rw(op+XOP_CMD,rr(op+XOP_CMD)&~CMD_RS);
-    if(wait32(op+XOP_STS,STS_HCH,STS_HCH,100000))return -1;
-    rw(op+XOP_CMD,rr(op+XOP_CMD)|CMD_HCRST);
-    if(wait32(op+XOP_CMD,CMD_HCRST,0,100000))return -1;
-    if(wait32(op+XOP_STS,STS_CNR,0,100000))return -1;
-    ring_init();zero(dcbaa,sizeof(dcbaa));zero(out_ctx,sizeof(out_ctx));
-    if(sp_count)dcbaa[0]=ptr64(sp_table);
-    rw64(op+XOP_DCBAAP,ptr64(dcbaa));
-    rw64(op+XOP_CRCR,ptr64(cmd_ring)|1);
-    rw(op+XOP_CONFIG,(u32)maxslots);
-    erst[0]=(u64)ptr64(event_ring);erst[1]=64;
-    rw(rt+0x28,1);
-    rw64(rt+0x30,ptr64(erst));
-    ev_dequeue=(u32)ptr64(event_ring);
-    rw64(rt+0x38,ptr64(event_ring)|8);
-    rw(rt+0x20,0); /* interrupter disabled; we poll the event ring */
-    rw(op+XOP_CMD,rr(op+XOP_CMD)|CMD_RS);
-    if(wait32(op+XOP_STS,STS_HCH,0,100000))return -1;
-    ready=1;
+    if (!(v & PORT_PRC))
+        return -1;
+    *ps = v | PORT_PRC;   /* ack reset-change, keep PED/PP */
+    for (int i = 0; i < 100; i++) {
+        sleep_ms(1);
+        v = *ps;
+        if (v & PORT_PED)
+            break;
+    }
+    if (!(v & PORT_PED))
+        return -1;
+    if (speed)
+        *speed = PORT_SPEED(v);
     return 0;
 }
-int xhci_present(void){return ready;}
-int xhci_nports(void){return ready?maxports:0;}
-int xhci_ndev(void){return ndev;}
-int xhci_connected(int p){
-    if(!ready||p<0||p>=maxports)return 0;
-    return (rr(op+XOP_PORTS+p*0x10)&PORT_CCS)?1:0;
+
+/* ---- init ---- */
+static int find_xhci(pci_dev_t *out) {
+    /* Renoir/Cezanne/Barcelo USB 3.1 controllers use 1022:1639.
+     * Keep the class-code fallback so other xHCI controllers work too. */
+    if (pci_find(0x1022, 0x1639, out) == 0)
+        return 0;
+    return pci_find_class(0x0c0330, out);
 }
-int xhci_enumerate_port(int p,int index){
-    u8 d[18],cfg[256];int speed,slot;int total,pos,config=0,ifnum=-1;
-    u8 kep=0,mep=0,kmps=8,mmps=4;
-    char msg[64];
-
-    if(index<0||index>=2){
-        status_err("invalid HID slot");
+int xhci_init(void) {
+    pci_dev_t d;
+    u32 bar, cap, hcc, hcs1, dboff, rtsoff;
+    int slots, ports;
+    if (ready)
+        return 0;
+    ndev = 0;
+    if (find_xhci(&d))
         return -1;
-    }
-
-    if(!xhci_connected(p)){
-        status_warn("port not connected");
+    bar = d.bars[0];
+    if (!(bar & 1) && ((bar & 6) == 4) && d.bars[1])
+        return -1;   /* 64-bit BAR above 32-bit address space */
+    bar = pci_bar_addr(&d, 0);
+    if (!bar)
         return -1;
+    pci_set_cmd(&d, 0x06);
+    mmio = (volatile u8 *)(u32)bar;
+    cap = mmio[0];
+    op = cap;
+    xlogv("CAPLENGTH", cap);
+    hcc = *(volatile u32 *)(mmio + XCAP_HCC1);
+    ctx_size = (hcc & (1u << 2)) ? 64 : 32;
+    hcs1 = *(volatile u32 *)(mmio + XCAP_HCSP1);
+    slots = hcs1 & 0xff;
+    ports = (hcs1 >> 24) & 0xff;
+    dboff = *(volatile u32 *)(mmio + XCAP_DBOFF);
+    rtsoff = *(volatile u32 *)(mmio + XCAP_RTSOFF);
+    xlogv("DBOFF", dboff);
+    xlogv("RTSOFF", rtsoff);
+    xlogv("PAGESZ", *(volatile u32 *)(mmio + op + XOP_PAGESZ));
+    {
+        int maxs = slots > 8 ? 8 : slots;
+        int maxp = ports > 16 ? 16 : ports;
+        /* stash in globals via locals (keeps the shape obvious) */
+        maxports = maxp;
+        slots = maxs;
     }
-
-    if(port_reset(p,&speed)){
-        status_err("port reset failed");
+    if (!slots || !maxports)
         return -1;
-    }
-    status_ok("port reset");
-
-    if(speed==0||speed>15){
-        status_err("invalid USB speed");
+    /* DBOFF/RTSOFF are offsets from the MMIO base (BAR), NOT from op.
+     * Only PORTSC/CONFIG/CRCR/DCBAAP/PAGESIZE are op-relative. Getting
+     * this wrong (+op) programs exactly nothing: ERST stays size 0,
+     * completions can never post, doorbells vanish without HCE. */
+    db = dboff;
+    rt = rtsoff;
+    if ((*(volatile u32 *)(mmio + op + XOP_PAGESZ) & 1) == 0)
         return -1;
-    }
-    if(speed>3){
-        status_warn("SuperSpeed device not supported yet");
-        return -1;
-    }
-
-    ep_ring_reset(index);
-    for(int z=0;z<32;z++){trb_clear(&kbd_rings[index][z]);trb_clear(&mouse_rings[index][z]);}
-    make_link(kbd_rings[index]);make_link(mouse_rings[index]);
-
-    if(enable_slot(&slot)){
-        status_err("Enable Slot failed");
-        return -1;
-    }
-    status_ok("Enable Slot");
-
-    xdev_t *x=&devs[index];zero(x,sizeof(*x));x->used=1;x->index=index;x->port=p+1;x->slot=slot;
-    x->speed=speed;x->mps=(speed==3)?64:8;x->ep_i=0;x->ep_cycle=1;
-
-    if(address_device(x)){
-        status_err("Address Device failed");
-        return -1;
-    }
-    status_ok("Address Device");
-
-    if(getdesc(x,1,d,18)){
-        status_err("device descriptor failed");
-        return -1;
-    }
-    status_ok("device descriptor");
-
-    x->mps=d[7]?d[7]:x->mps;
-    zero(in_ctx,2048);u32 *ic=(u32*)in_ctx;ic[1]=1u<<1;
-    u32 *e0=ctx(in_ctx,2);e0[1]=(4u<<3)|((u32)x->mps<<16);
-    if(command((u32)ptr64(in_ctx),(u32)(ptr64(in_ctx)>>32),0,
-               TRB_EVAL_CONTEXT|((u32)slot<<24),0)){
-        status_err("Evaluate Context failed");
-        return -1;
-    }
-
-    if(getdesc(x,2,cfg,9)){
-        status_err("config descriptor header failed");
-        return -1;
-    }
-    total=cfg[2]|((int)cfg[3]<<8);
-    if(total<9){
-        status_err("invalid config descriptor");
-        return -1;
-    }
-    if(total>256)total=256;
-    if(getdesc(x,2,cfg,total)){
-        status_err("config descriptor failed");
-        return -1;
-    }
-    status_ok("config descriptor");
-
-    pos=0;
-    while(pos+2<=total){
-        int l=cfg[pos],t=cfg[pos+1];if(l<2||pos+l>total)break;
-        if(t==2&&l>=9)config=cfg[pos+5];
-        if(t==4&&l>=9&&cfg[pos+5]==3&&cfg[pos+6]==1){
-            ifnum=cfg[pos+2];int proto=cfg[pos+7],eps=cfg[pos+4],q=pos+l;
-            for(int e=0;e<eps&&q+2<=total;e++){int el=cfg[q],et=cfg[q+1];if(el<2||q+el>total)break;
-                if(et==5&&el>=7&&(cfg[q+2]&0x80)&&((cfg[q+3]&3)==3)){
-                    u8 ep=(u8)(cfg[q+2]&15);u8 m=(u8)(cfg[q+4]|((cfg[q+5]&3)<<8));
-                    if(proto==1&&!kep){kep=ep;kmps=m?m:8;}
-                    if(proto==2&&!mep){mep=ep;mmps=m?m:4;}
-                } q+=el;
+    /* Hand ownership to the OS when the legacy BIOS capability exists. */
+    {
+        u32 ext = (hcc >> 16) * 4;
+        while (ext) {
+            u32 v = *(volatile u32 *)(mmio + ext);
+            u8 id = v & 0xff, next = (v >> 8) & 0xff;
+            if (id == 1) {
+                *(volatile u32 *)(mmio + ext) = v | (1u << 24);
+                for (int i = 0; i < 100000; i++) {
+                    v = *(volatile u32 *)(mmio + ext);
+                    if (!(v & (1u << 16)))
+                        break;
+                }
+                break;
             }
-        } pos+=l;
+            if (!next)
+                break;
+            ext += next * 4;
+        }
     }
-
-    if(!config||ifnum<0||(!kep&&!mep)){
-        status_warn("no boot HID interface");
+    if (hce_check("handoff"))
         return -1;
-    }
-    status_ok("boot HID interface");
-
-    if(setcfg(x,(u8)config)){
-        status_err("Set Configuration failed");
+    rw(op + XOP_CMD, rr(op + XOP_CMD) & ~CMD_RS);
+    if (wait32(op + XOP_STS, STS_HCH, STS_HCH, 100000))
         return -1;
-    }
-    status_ok("Set Configuration");
-
-    if(setproto(x,(u8)ifnum)){
-        status_err("Set Protocol failed");
+    rw(op + XOP_CMD, rr(op + XOP_CMD) | CMD_HCRST);
+    if (wait32(op + XOP_CMD, CMD_HCRST, 0, 100000))
         return -1;
+    if (wait32(op + XOP_STS, STS_CNR, 0, 100000))
+        return -1;
+    if (hce_check("reset"))
+        return -1;
+    zero(dcbaa, sizeof(dcbaa));
+    zero(out_ctx, sizeof(out_ctx));
+    /* scratchpad buffers if the controller wants any (dormant on QEMU);
+     * dcbaa[0] is the scratchpad array pointer, not a device context */
+    {
+        u32 hcs2 = *(volatile u32 *)(mmio + XCAP_HCSP2);
+        int sp = (int)(((hcs2 >> 21) & 31u) << 5) | (int)((hcs2 >> 27) & 31u);
+        if (sp < 0 || sp > 8)
+            return -1;
+        if (sp) {
+            u64 *tab = kmalloc_aligned((u32)sp * 8u, 64);
+            int i;
+            if (!tab)
+                return -1;
+            for (i = 0; i < 8; i++) sp_pages[i] = 0;
+            for (i = 0; i < sp; i++) {
+                sp_pages[i] = kmalloc_aligned(4096, 4096);
+                if (!sp_pages[i])
+                    return -1;
+                zero(sp_pages[i], 4096);
+                tab[i] = phys(sp_pages[i]);
+            }
+            dcbaa[0] = phys(tab);
+            /* NOTE: tab itself leaks on purpose (owned by hardware now) */
+        }
     }
-    status_ok("Set Protocol");
-
-    if(kep){
-        if(configure_ep(x,(u8)(kep*2+1),kmps,10)){
-            status_err("keyboard endpoint failed");
+    rw64(op + XOP_DCBAAP, phys(dcbaa));
+    rw64(op + XOP_CRCR, phys(cmd_ring) | 1u);
+    rw(op + XOP_CONFIG, (u32)slots);
+    erst[0] = phys(event_ring);
+    erst[1] = EV_N;
+    rw(rt + 0x28, 1);
+    rw64(rt + 0x30, phys(erst));
+    rw64(rt + 0x38, phys(event_ring));
+    rw(rt + 0x20, 0);   /* interrupter disabled; we poll the event ring */
+    /* Wipe SeaBIOS-era events: same slots/DCIs get reused, and stale
+     * entries would match our slot/dci polling (or head-block it).
+     * Zeroed RAM reads cycle 0 != consumer 1 = empty. */
+    for (int i = 0; i < EV_N; i++)
+        event_ring[i].a = event_ring[i].b = event_ring[i].c =
+            event_ring[i].d = 0;
+    ev_idx = 0;
+    ev_cyc = 1;
+    if (hce_check("rings"))
+        return -1;
+    rw(op + XOP_CMD, rr(op + XOP_CMD) | CMD_RS);
+    if (wait32(op + XOP_STS, STS_HCH, 0, 100000))
+        return -1;
+    if (hce_check("run"))
+        return -1;
+    /* self-test: a NoOp must complete if command/event plumbing works */
+    {
+        u32 dummy = 0;
+        if (command(0, 0, 0, TRB_T_NOOP, &dummy)) {
+            xlog("self-test NoOp failed");
             return -1;
         }
-        x->kbd_ep=kep;x->kbd_mps=kmps;
-        status_ok("keyboard endpoint");
     }
-    if(mep){
-        if(configure_ep(x,(u8)(mep*2+1),mmps,10)){
-            status_err("mouse endpoint failed");
-            return -1;
-        }
-        x->mouse_ep=mep;x->mouse_mps=mmps;
-        status_ok("mouse endpoint");
+    xlog("controller running, cmd path OK");
+    /* TEMPORARY EXPERIMENT (revert after test): consume slots 1-2 so
+     * real devices enumerate on fresh slots 3+. Tests whether QEMU
+     * keeps stale per-slot EP state across HCRST. */
+    {
+        u32 dummy;
+        command(0, 0, 0, TRB_C_ENABLE_SLOT, &dummy);
+        command(0, 0, 0, TRB_C_ENABLE_SLOT, &dummy);
+        xlogv("burned slots, last", dummy);
     }
-
-    if(kep||mep) status_ok("HID device ready");
-    else status_warn("HID device has no usable endpoints");
-
-    if(index>=ndev)ndev=index+1;
-    (void)msg;
+    ready = 1;
     return 0;
 }
-static int poll_transfer_event(u32 slot,u8 epid,u32 *status){
-    trb_t *e=&event_ring[ev_i];
-    if((e->d&1u)!=((u32)ev_cycle))return 0;
-    u32 et=(e->d>>10)&63;
-    if(et!=TRB_TRANSFER)return 0;
-    if((e->d>>24)!=slot || ((e->d>>16)&31)!=epid)return 0;
-    u32 st=e->c;
-    ev_i++;if(ev_i==64){ev_i=0;ev_cycle^=1;}
-    ev_dequeue=(u32)ptr64(&event_ring[ev_i]);rw(rt+0x38,ev_dequeue|8);
-    if(status)*status=(st>>24)&255;return 1;
+int xhci_present(void) { return ready; }
+int xhci_nports(void) { return ready ? maxports : 0; }
+int xhci_ndev(void) { return ndev; }
+int xhci_connected(int p) {
+    if (!ready || p < 0 || p >= maxports)
+        return 0;
+    return (rr(op + XOP_PORTS + p * 0x10) & PORT_CCS) ? 1 : 0;
 }
-static void queue_intr(xdev_t*x,u8 ep,void*buf,int len){
-    trb_t*ring=(ep&1)?kbd_rings[x->index]:mouse_rings[x->index];
-    int *pi=(ep&1)?&x->k_i:&x->m_i,*pc=(ep&1)?&x->k_cycle:&x->m_cycle;
-    trb_t*t=&ring[*pi];int cyc=*pc;t->a=(u32)ptr64(buf);t->b=(u32)(ptr64(buf)>>32);t->c=len;t->d=TRB_NORMAL|TRB_IOC|(u32)cyc;
-    (*pi)++;if(*pi==31){ring[31].d=TRB_TYPE(6)|TRB_LINK_TOGGLE|(u32)(*pc);*pi=0;*pc^=1;}rw(db+x->slot*4,(u32)(ep*2+1));
+
+/* ---- enumeration ---- */
+int xhci_enumerate_port(int p, int index) {
+    u8 d[18], cfg[256];
+    int speed, slot, total, pos, config = 0, ifnum = -1;
+    u8 kep = 0, mep = 0, kmps = 8, mmps = 4;
+    xdev_t *x;
+
+    if (index < 0 || index >= 2) {
+        xlog("invalid HID slot");
+        return -1;
+    }
+    if (!xhci_connected(p)) {
+        xlog("port not connected");
+        return -1;
+    }
+    if (port_reset(p, &speed)) {
+        xlog("port reset failed");
+        return -1;
+    }
+    xlog("port reset");
+    if (hce_check("port reset"))
+        return -1;
+    if (speed == 0 || speed > 15) {
+        xlog("invalid USB speed");
+        return -1;
+    }
+    if (speed > 3) {
+        xlog("SuperSpeed device not supported yet");
+        return -1;
+    }
+    x = &devs[index];
+    zero(x, sizeof(*x));
+    x->used = 1;
+    x->index = index;
+    x->port = p + 1;
+    x->speed = speed;
+    x->mps = (speed == 3) ? 64 : 8;
+    ring_reset(&x->ep0, ep0_ring[index], EP_N);
+    ring_reset0(&x->kbd, kbd_ring[index], EP_N);
+    ring_reset0(&x->mse, mse_ring[index], EP_N);
+
+    if (enable_slot(&slot)) {
+        xlog("Enable Slot failed");
+        return -1;
+    }
+    xlog("Enable Slot");
+    x->slot = slot;
+    if (hce_check("enable slot"))
+        return -1;
+
+    if (address_device(x, next_usb_addr++)) {
+        xlog("Address Device failed");
+        return -1;
+    }
+    xlog("Address Device");
+    if (hce_check("address device"))
+        return -1;
+
+    if (getdesc(x, 1, 0, d, 18)) {
+        xlog("device descriptor failed");
+        return -1;
+    }
+    xlog("device descriptor");
+    if (d[1] != 1 || d[0] < 8) {
+        xlog("bad device descriptor");
+        return -1;
+    }
+    x->mps = d[7] ? d[7] : x->mps;
+    if (eval_ep0(x)) {
+        xlog("Evaluate Context failed");
+        return -1;
+    }
+    if (getdesc(x, 2, 0, cfg, 9)) {
+        xlog("config descriptor header failed");
+        return -1;
+    }
+    total = cfg[2] | ((int)cfg[3] << 8);
+    if (total < 9) {
+        xlog("invalid config descriptor");
+        return -1;
+    }
+    if (total > 256)
+        total = 256;
+    if (getdesc(x, 2, 0, cfg, total)) {
+        xlog("config descriptor failed");
+        return -1;
+    }
+    xlog("config descriptor");
+
+    pos = 0;
+    while (pos + 2 <= total) {
+        int l = cfg[pos], t = cfg[pos + 1];
+        if (l < 2 || pos + l > total)
+            break;
+        if (t == 2 && l >= 9)
+            config = cfg[pos + 5];
+        if (t == 4 && l >= 9 && cfg[pos + 5] == 3 && cfg[pos + 6] == 1) {
+            /* HID boot interface. NOTE: endpoint descriptors do NOT
+             * immediately follow: a HID class descriptor sits between
+             * the interface and endpoint descriptors, so walk until
+             * the next interface/config instead of counting `eps`. */
+            int proto = cfg[pos + 7], q = pos + l;
+            ifnum = cfg[pos + 2];
+            while (q + 2 <= total) {
+                int el = cfg[q], et = cfg[q + 1];
+                if (el < 2 || q + el > total)
+                    break;
+                if (et == 4 || et == 2)
+                    break;   /* next interface/config: stop */
+                if (et == 5 && el >= 7 && (cfg[q + 2] & 0x80) &&
+                    ((cfg[q + 3] & 3) == 3)) {
+                    u8 ep = (u8)(cfg[q + 2] & 15);
+                    u16 mp = (u16)cfg[q + 4] | ((u16)(cfg[q + 5] & 7) << 8);
+                    if (proto == 1 && !kep) {
+                        kep = ep;
+                        kmps = mp ? (u8)(mp > 8 ? 8 : mp) : 8;
+                    }
+                    if (proto == 2 && !mep) {
+                        mep = ep;
+                        mmps = mp ? (u8)(mp > 4 ? 4 : mp) : 4;
+                    }
+                }
+                q += el;
+            }
+        }
+        pos += l;
+    }
+
+    if (!config || ifnum < 0 || (!kep && !mep)) {
+        xlog("no boot HID interface");
+        return -1;
+    }
+    xlog("boot HID interface");
+    if (setcfg(x, (u8)config)) {
+        xlog("Set Configuration failed");
+        return -1;
+    }
+    xlog("Set Configuration");
+    if (setproto(x, (u8)ifnum)) {
+        xlog("Set Protocol failed");
+        return -1;
+    }
+    xlog("Set Protocol");
+
+    /* one Configure Endpoint per interrupt-IN pipe, top DCI covered */
+    {
+        int top = 1, rc;
+        if (kep && (int)(kep * 2 + 1) > top)
+            top = kep * 2 + 1;
+        if (mep && (int)(mep * 2 + 1) > top)
+            top = mep * 2 + 1;
+        zero(in_ctx, sizeof(in_ctx));
+        {
+            u32 *ic = (u32 *)in_ctx;
+            /* Add slot + new endpoints, byte-identical in shape to
+             * SeaBIOS: EP0 neither added nor written (zeros). */
+            ic[1] = 1u << 0;
+            for (int e = 3; e <= top; e++)
+                ic[1] |= 1u << e;
+        }
+        ctx_wr(1, ((u32)speed << 20) | ((u32)top << 27), (u32)x->port << 16,
+               0, 0);
+        /* NOTE: EP0 context deliberately left zeroed (SeaBIOS does not
+         * write it either when it is not in Add; QEMU trips on stray
+         * EP0 bytes here even though EP0 is not being configured). */
+        /* EP contexts mirror SeaBIOS's proven-good encoding: plain
+         * interval/type/MPS/ring/avg, no CErr or ESIT extras (either
+         * of those draws code 5 from QEMU here). */
+        if (kep)
+            ctx_wr(kep * 2 + 1, (u32)fs_interval(10) << 16,
+                   EP_TYPE_INT_IN | ((u32)kmps << 16),
+                   phys(x->kbd.t), 8);
+        if (mep)
+            ctx_wr(mep * 2 + 1, (u32)fs_interval(10) << 16,
+                   EP_TYPE_INT_IN | ((u32)mmps << 16),
+                   phys(x->mse.t), 8);
+        /* TEMPORARY: dump EP3 input dwords (guest-side truth) */
+        if (kep) {
+            u32 *epc = ictx(kep * 2 + 1);
+            xlogv("ep3.d0", epc[0]);
+            xlogv("ep3.d1", epc[1]);
+            xlogv("ep3.d2", epc[2]);
+            xlogv("ep3.d4", epc[4]);
+        }
+        rc = command((u32)phys(in_ctx), (u32)(phys(in_ctx) >> 32), 0,
+                     TRB_C_CONFIG_EP | ((u32)slot << 24), 0);
+        if (rc) {
+            xlog("configure endpoints failed");
+            return -1;
+        }
+        if (kep) {
+            x->kbd_dci = kep * 2 + 1;
+            x->kbd_mps = kmps;
+        }
+        if (mep) {
+            x->mse_dci = mep * 2 + 1;
+            x->mse_mps = mmps;
+        }
+        /* NOTE: no Stop+SetDequeue resync here. It was added for a
+         * stale-EP theory, but it leaves the EP Stopped and QEMU
+         * never resumes it (doorbells kick forever without fetching).
+         * The stale-event issue it accompanied is fixed separately
+         * (ring wipe + TRB-pointer matching). */
+        xlog("endpoints configured");
+    }
+    /* write full output EP contexts ourselves; the fields QEMU maintains
+     * (state, dequeue) are written with matching values. */
+    {
+        u8 *base = out_ctx[x->index];
+        if (kep) {
+            u32 *p = (u32 *)(base + (1 + (u32)kep) * (u32)ctx_size);
+            p[0] = ((u32)fs_interval(10) << 16) | 1u;
+            p[1] = EP_TYPE_INT_IN | ((u32)kmps << 16);
+            p[2] = (u32)phys(x->kbd.t);
+            p[3] = 0;
+            p[4] = kmps;
+        }
+        if (mep) {
+            u32 *p = (u32 *)(base + (1 + (u32)mep) * (u32)ctx_size);
+            p[0] = ((u32)fs_interval(10) << 16) | 1u;
+            p[1] = EP_TYPE_INT_IN | ((u32)mmps << 16);
+            p[2] = (u32)phys(x->mse.t);
+            p[3] = 0;
+            p[4] = mmps;
+        }
+    }
+    if (hce_check("configure"))
+        return -1;
+
+    if (index >= ndev)
+        ndev = index + 1;
+    xlog("HID device ready");
+    return 0;
 }
-int xhci_hid_trykey(int index,int *out){
-    if(!ready||index<0||index>=ndev||!devs[index].used||!devs[index].kbd_ep)return -1;
-    xdev_t*x=&devs[index];u32 st;
-    if(!k_pending[index]){queue_intr(x,x->kbd_ep,kbuf[index],8);k_pending[index]=1;return -1;}
-    int ev=poll_transfer_event(x->slot,(u8)(x->kbd_ep*2+1),&st);if(!ev)return -1;k_pending[index]=0;
-    if(st!=COMP_SUCCESS&&st!=COMP_SHORT)return -1;
-    u8*r=kbuf[index];x->mod=r[0];
-    for(int i=0;i<6;i++){u8 k=r[2+i];int held=0;for(int j=0;j<6;j++)if(x->prev[j]==k&&k)held=1;if(!k||held)continue;x->prev[i]=k;
-        if(k==0x4f){*out=0x103;return 0;}if(k==0x50){*out=0x102;return 0;}if(k==0x51){*out=0x101;return 0;}if(k==0x52){*out=0x100;return 0;}
-        if(k==0x4a){*out=0x104;return 0;}if(k==0x4d){*out=0x105;return 0;}if(k==0x4c){*out=0x106;return 0;}
-        char ch=0;if(k>=4&&k<=29){static const char*lo="abcdefghijklmnopqrstuvwxyz";static const char*hi="ABCDEFGHIJKLMNOPQRSTUVWXYZ";ch=(x->mod&3)?hi[k-4]:lo[k-4];}
-        else if(k>=0x1e&&k<=0x27){static const char*n="1234567890";static const char*q="!@#$%^&*()";ch=(x->mod&3)?q[k-0x1e]:n[k-0x1e];}
-        else switch(k){case 0x28:ch='\n';break;case 0x2c:ch=' ';break;case 0x2a:ch='\b';break;case 0x2b:ch='\t';break;case 0x2d:ch=(x->mod&3)?'_':'-';break;case 0x2e:ch=(x->mod&3)?'+':'=';break;case 0x2f:ch=(x->mod&3)?'{':'[';break;case 0x30:ch=(x->mod&3)?'}':']';break;default:break;}
-        if(ch){*out=(u8)ch;return 0;}}
-    for(int i=0;i<6;i++)if(!r[2+i])x->prev[i]=0;return -1;
+
+/* ---- interrupt-IN polling ---- */
+static void queue_intr(xdev_t *x, ring_t *ring, int dci, void *buf,
+                       int len, u32 *last) {
+    *last = (u32)phys(&ring->t[ring->enq]);
+    ring_put(ring, (u32)phys(buf), (u32)(phys(buf) >> 32), (u32)len,
+             TRB_T_NORMAL | TRB_IOC);
+    rw(db + (u32)x->slot * 4u, (u32)dci);
 }
-int xhci_hid_mouse(int index,int*dx,int*dy,int*btn){
-    if(!ready||index<0||index>=ndev||!devs[index].used||!devs[index].mouse_ep)return 0;
-    xdev_t*x=&devs[index];u32 st;if(!m_pending[index]){queue_intr(x,x->mouse_ep,mbuf[index],4);m_pending[index]=1;return 0;}
-    int ev=poll_transfer_event(x->slot,(u8)(x->mouse_ep*2+1),&st);if(!ev)return 0;m_pending[index]=0;if(st!=COMP_SUCCESS&&st!=COMP_SHORT)return 0;
-    u8*r=mbuf[index];*btn=r[0]&7;*dx=(int)(signed char)r[1];*dy=-(int)(signed char)r[2];return 1;
+int xhci_hid_trykey(int index, int *out) {
+    u32 st;
+    xdev_t *x;
+    u8 *r;
+    if (!ready || index < 0 || index >= ndev || !devs[index].used ||
+        !devs[index].kbd_dci)
+        return -1;
+    x = &devs[index];
+    if (!k_queued[index]) {
+        int len = x->kbd_mps > 8 ? 8 : x->kbd_mps;
+        queue_intr(x, &x->kbd, x->kbd_dci, kbuf[index], len,
+                   &k_last[index]);
+        k_queued[index] = 1;
+        return -1;
+    }
+    if (!xfer_poll((u32)x->slot, (u32)x->kbd_dci, k_last[index], &st))
+        return -1;
+    k_queued[index] = 0;
+    if (st != COMP_SUCCESS && st != COMP_SHORT)
+        return -1;
+    r = kbuf[index];
+    if (r[0] == 1 && r[1] == 1 && r[2] == 1 && r[3] == 1 && r[4] == 1 &&
+        r[5] == 1 && r[6] == 1 && r[7] == 1)
+        return -1;   /* phantom (key rollover error), ignore report */
+    x->mod = r[0];
+    for (int i = 0; i < 6; i++) {
+        u8 k = r[2 + i];
+        int held = 0;
+        if (!k)
+            continue;
+        for (int j = 0; j < 6; j++)
+            if (x->prev[j] == k)
+                held = 1;
+        if (held)
+            continue;
+        x->prev[i] = k;
+        if (k == 0x39) {
+            x->caps = !x->caps;
+            int len = x->kbd_mps > 8 ? 8 : x->kbd_mps;
+            queue_intr(x, &x->kbd, x->kbd_dci, kbuf[index], len, &k_last[index]);
+            return 0;
+        }
+        if (k == 0x4f) {
+            *out = 0x103;
+            int len = x->kbd_mps > 8 ? 8 : x->kbd_mps;
+            queue_intr(x, &x->kbd, x->kbd_dci, kbuf[index], len, &k_last[index]);
+            return 0;
+        }
+        if (k == 0x50) {
+            *out = 0x102;
+            int len = x->kbd_mps > 8 ? 8 : x->kbd_mps;
+            queue_intr(x, &x->kbd, x->kbd_dci, kbuf[index], len, &k_last[index]);
+            return 0;
+        }
+        if (k == 0x51) {
+            *out = 0x101;
+            int len = x->kbd_mps > 8 ? 8 : x->kbd_mps;
+            queue_intr(x, &x->kbd, x->kbd_dci, kbuf[index], len, &k_last[index]);
+            return 0;
+        }
+        if (k == 0x52) {
+            *out = 0x100;
+            int len = x->kbd_mps > 8 ? 8 : x->kbd_mps;
+            queue_intr(x, &x->kbd, x->kbd_dci, kbuf[index], len, &k_last[index]);
+            return 0;
+        }
+        if (k == 0x4a) {
+            *out = 0x104;
+            int len = x->kbd_mps > 8 ? 8 : x->kbd_mps;
+            queue_intr(x, &x->kbd, x->kbd_dci, kbuf[index], len, &k_last[index]);
+            return 0;
+        }
+        if (k == 0x4d) {
+            *out = 0x104;
+            int len = x->kbd_mps > 8 ? 8 : x->kbd_mps;
+            queue_intr(x, &x->kbd, x->kbd_dci, kbuf[index], len, &k_last[index]);
+            return 0;
+        }
+        if (k == 0x4c) {
+            *out = 0x105;
+            int len = x->kbd_mps > 8 ? 8 : x->kbd_mps;
+            queue_intr(x, &x->kbd, x->kbd_dci, kbuf[index], len, &k_last[index]);
+            return 0;
+        }
+        if (k == 0x4c) {
+            *out = 0x106;
+            int len = x->kbd_mps > 8 ? 8 : x->kbd_mps;
+            queue_intr(x, &x->kbd, x->kbd_dci, kbuf[index], len, &k_last[index]);
+            return 0;
+        }
+        if (k == 0x29) {
+            *out = 27;
+            int len = x->kbd_mps > 8 ? 8 : x->kbd_mps;
+            queue_intr(x, &x->kbd, x->kbd_dci, kbuf[index], len, &k_last[index]);
+            return 0;
+        }
+        if ((x->mod & 0x11) && k == 0x06) {
+            *out = 3;
+            int len = x->kbd_mps > 8 ? 8 : x->kbd_mps;
+            queue_intr(x, &x->kbd, x->kbd_dci, kbuf[index], len, &k_last[index]);
+            return 0;
+        }
+        if ((x->mod & 0x11) && k == 0x07) {
+            *out = 4;
+            int len = x->kbd_mps > 8 ? 8 : x->kbd_mps;
+            queue_intr(x, &x->kbd, x->kbd_dci, kbuf[index], len, &k_last[index]);
+            return 0;
+        }
+        {
+            char ch = 0;
+            int shift = (x->mod & 0x22) != 0;
+            if (k >= 4 && k <= 29) {
+                static const char *lo = "abcdefghijklmnopqrstuvwxyz";
+                static const char *hi = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+                ch = (shift ? hi : lo)[k - 4];
+                if (x->caps)
+                    ch = (char)(ch ^ 32);
+            } else if (k >= 0x1e && k <= 0x27) {
+                static const char *n = "1234567890";
+                static const char *q = "!@#$%^&*()";
+                ch = (shift ? q : n)[k - 0x1e];
+            } else
+                switch (k) {
+                case 0x28: ch = '\n'; break;
+                case 0x2c: ch = ' '; break;
+                case 0x2a: ch = '\b'; break;
+                case 0x2b: ch = '\t'; break;
+                case 0x2d: ch = shift ? '_' : '-'; break;
+                case 0x2e: ch = shift ? '+' : '='; break;
+                case 0x2f: ch = shift ? '{' : '['; break;
+                case 0x30: ch = shift ? '}' : ']'; break;
+                case 0x31: ch = shift ? '|' : '\\'; break;
+                case 0x33: ch = shift ? ':' : ';'; break;
+                case 0x34: ch = shift ? '"' : '\''; break;
+                case 0x35: ch = shift ? '~' : '`'; break;
+                case 0x36: ch = shift ? '<' : ','; break;
+                case 0x37: ch = shift ? '>' : '.'; break;
+                case 0x38: ch = shift ? '?' : '/'; break;
+                default: break;
+                }
+            if (ch) {
+                *out = (u8)ch;
+                int len = x->kbd_mps > 8 ? 8 : x->kbd_mps;
+                queue_intr(x, &x->kbd, x->kbd_dci, kbuf[index], len, &k_last[index]);
+                return 0;
+            }
+        }
+    }
+    for (int i = 0; i < 6; i++)
+        if (!r[2 + i])
+            x->prev[i] = 0;
+    return -1;
+}
+int xhci_hid_mouse(int index, int *dx, int *dy, int *btn) {
+    xdev_t *x;
+    u32 st;
+    u8 *r;
+    if (!ready || index < 0 || index >= ndev || !devs[index].used ||
+        !devs[index].mse_dci)
+        return 0;
+    x = &devs[index];
+    if (!m_queued[index]) {
+        int len = x->mse_mps > 4 ? 4 : x->mse_mps;
+        queue_intr(x, &x->mse, x->mse_dci, mbuf[index], len,
+                   &m_last[index]);
+        m_queued[index] = 1;
+        return 0;
+    }
+    if (!xfer_poll((u32)x->slot, (u32)x->mse_dci, m_last[index], &st))
+        return 0;
+    m_queued[index] = 0;
+    if (st != COMP_SUCCESS && st != COMP_SHORT)
+        return 0;
+    r = mbuf[index];
+    *btn = r[0] & 7;
+    *dx = (int)(signed char)r[1];
+    *dy = -(int)(signed char)r[2];
+    {
+        int len = x->mse_mps > 4 ? 4 : x->mse_mps;
+        queue_intr(x, &x->mse, x->mse_dci, mbuf[index], len,
+                   &m_last[index]);
+    }
+    return 1;
 }

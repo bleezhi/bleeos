@@ -22,6 +22,7 @@ typedef struct {
     unsigned char boot_drive;  /* 0xE0 = UEFI (never a BIOS DL) */
     unsigned char installed;   /* booted from HD media */
     unsigned char pad[2];
+    unsigned int ram_kb;       /* total conventional RAM in KB (0 = unknown) */
 } uefiparam_t;
 
 #endif
