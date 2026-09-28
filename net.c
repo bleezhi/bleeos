@@ -3,6 +3,7 @@
  * written out byte-wise (no struct packing / endian games). */
 #include "net.h"
 #include "e1000.h"
+#include "tcp.h"
 
 #define MY_IP 0x0A00020Fu   /* 10.0.2.15 */
 #define GW_IP 0x0A000202u   /* 10.0.2.2 */
@@ -145,6 +146,16 @@ static void ip_echo_reply(const u8 *f, int n, const u8 *srcmac) {
     e1000_tx(out, 14 + total);
 }
 
+u16 net_csum(const u8 *b, int n) { return csum(b, n); }
+void net_put16(u8 *p, u16 v) { put16(p, v); }
+void net_put32(u8 *p, u32 v) { put32(p, v); }
+u16 net_get16(const u8 *p) { return get16(p); }
+u32 net_get32(const u8 *p) { return get32(p); }
+void net_mac(u8 *mac) {
+    for (int i = 0; i < 6; i++) mac[i] = mymac[i];
+}
+int net_resolve(u32 ip, u8 *mac) { return resolve(ip, mac); }
+
 void net_poll(void) {
     static u8 buf[2048];
     int n;
@@ -167,6 +178,14 @@ void net_poll(void) {
         } else if (type == ET_IP) {
             u32 dst = get32(buf + 30);
             if (dst != MY_IP) continue;
+            /* UDP (DNS) and TCP live in tcp.c */
+            {
+                int hlen = (buf[14] & 0x0F) * 4;
+                if (hlen >= 20 && n >= 14 + hlen + 8) {
+                    if (buf[23] == 17) { net_udp_in(buf, n); continue; }
+                    if (buf[23] == 6) { net_tcp_in(buf, n); continue; }
+                }
+            }
             /* echo reply for us? */
             {
                 int hlen = (buf[14] & 0x0F) * 4;

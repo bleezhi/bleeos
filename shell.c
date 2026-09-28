@@ -872,6 +872,7 @@ static int b_run(int argc, char **argv, const char *in);
 static int b_pkg(int argc, char **argv, const char *in);
 static int b_net(int argc, char **argv, const char *in);
 static int b_ping(int argc, char **argv, const char *in);
+static int b_curl(int argc, char **argv, const char *in);
 static int b_mem(int argc, char **argv, const char *in);
 static int run_line(char *line);
 static int read_new_pass(char *buf, u32 cap);
@@ -972,6 +973,11 @@ static const char MAN_PING[] =
     "ping - ICMP echo\nUsage: ping IP [COUNT]\n"
     "Sends echo requests (default 4, max 8), ARPs as needed.\n"
     "Only the local /24 is reachable (try the gateway).\n";
+static const char MAN_CURL[] =
+    "curl - fetch a web page (HTTP/1.0)\nUsage: curl HOST[/PATH]\n"
+    "Resolves HOST via DNS (or dotted IP), GETs the path\n"
+    "on port 80 and prints the body. Needs -device e1000\n"
+    "(try: curl example.com).";
 static const char MAN_FILER[] =
     "filer - file explorer\nUsage: filer\n"
     "Interactive file explorer with directory navigation.\n"
@@ -1058,6 +1064,7 @@ static const cmd_t cmds[] = {
     {"mem", "heap stats", MAN_MEM, b_mem},
     {"net", "network status", MAN_NET, b_net},
     {"ping", "ICMP echo", MAN_PING, b_ping},
+    {"curl", "fetch a web page", MAN_CURL, b_curl},
     {"filer", "file explorer", MAN_FILER, b_filer},
     {0, 0, 0, 0},
 };
@@ -2048,6 +2055,71 @@ static int b_ping(int argc, char **argv, const char *in) {
     }
     got = net_ping(dst, count);
     return got > 0 ? 0 : 1;
+}
+
+#include "tcp.h"
+static char curl_body[2100];   /* .bss: far too big for the stack */
+static int b_curl(int argc, char **argv, const char *in) {
+    char host[64], path[96];
+    u32 ip, len = 0;
+    int hi = 0, pi = 0;
+    char *body = curl_body;
+    const char *a;
+    (void)in;
+    if (argc != 2) {
+        sh_eprint("Usage: curl HOST[/PATH]\n");
+        return 1;
+    }
+    a = argv[1];
+    if (a[0] == 'h' && a[1] == 't' && a[2] == 't' && a[3] == 'p' &&
+        a[4] == ':' && a[5] == '/' && a[6] == '/')
+        a += 7;
+    while (*a && *a != '/' && hi < 63) host[hi++] = *a++;
+    host[hi] = 0;
+    if (!host[0]) {
+        sh_eprint("curl: empty host\n");
+        return 1;
+    }
+    if (*a == '/')
+        while (*a && pi < 95) path[pi++] = *a++;
+    if (!pi) { path[0] = '/'; pi = 1; }
+    path[pi] = 0;
+    if (!e1000_present() && e1000_init()) {
+        sh_eprint("curl: no E1000 NIC found (try -device e1000)\n");
+        return 1;
+    }
+    if (parse_ip(host, &ip)) {
+        sh_print("resolving ");
+        sh_print(host);
+        sh_print("...\n");
+        if (dns_query(host, &ip)) {
+            sh_eprint("curl: DNS failed\n");
+            return 1;
+        }
+        sh_print("resolved ");
+        print_ip(ip);
+        sh_putc('\n');
+    }
+    sh_print("fetching http://");
+    sh_print(host);
+    sh_print(path);
+    sh_print(" ...\n");
+    if (tcp_http_get(ip, host, path, body, sizeof(curl_body), &len)) {
+        sh_eprint("curl: fetch failed\n");
+        return 1;
+    }
+    {
+        char nb[12];
+        sh_print("got ");
+        sh_print(sutoa(len, nb, 10, 0));
+        sh_print(" bytes:\n");
+    }
+    for (u32 i = 0; i < len; i++) {
+        if (body[i] == '\r') continue;
+        sh_putc(body[i]);
+    }
+    if (!len || body[len - 1] != '\n') sh_putc('\n');
+    return 0;
 }
 
 static int b_mem(int argc, char **argv, const char *in) {

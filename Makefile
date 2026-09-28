@@ -20,7 +20,7 @@ CFLAGS=-m32 -march=i386 -mno-mmx -mno-sse -mno-sse2 -ffreestanding -nostdlib -no
        -fno-builtin -fno-stack-protector -fno-pie -no-pie \
        -Wall -Wextra -O2 -std=gnu11
 
-OBJS=kernel_entry.o drivers.o bootmenu.o shell.o kernel.o vbe.o gfx.o mouse.o wm.o apps.o login.o ata.o users.o uhci.o xhci.o usb.o tui.o pkg.o doom.o e1000.o net.o vt.o term.o irq.o irq_c.o heap.o pci.o amd_display.o fbcon.o hdimg.o fetch.o gpt.o fat.o
+OBJS=kernel_entry.o drivers.o bootmenu.o shell.o kernel.o vbe.o gfx.o mouse.o wm.o apps.o login.o ata.o users.o uhci.o xhci.o usb.o tui.o pkg.o doom.o e1000.o net.o tcp.o vt.o term.o irq.o irq_c.o heap.o pci.o amd_display.o fbcon.o hdimg.o fetch.o gpt.o fat.o
 # install blobs: boot.bin (MBR for HD targets) + BOOTX64.EFI (ESP for HD
 # targets), embedded as binary objects for the installer backend
 BOOTBINDS=bootbind.o loaderbind.o
@@ -98,8 +98,11 @@ amd_display.o: amd_display.c amd_display.h pci.h drivers.h
 e1000.o: e1000.c e1000.h drivers.h
 	$(CC) $(CFLAGS) -c e1000.c -o e1000.o
 
-net.o: net.c net.h e1000.h drivers.h
+net.o: net.c net.h e1000.h drivers.h tcp.h
 	$(CC) $(CFLAGS) -c net.c -o net.o
+
+tcp.o: tcp.c tcp.h net.h e1000.h drivers.h
+	$(CC) $(CFLAGS) -c tcp.c -o tcp.o
 
 vt.o: vt.c vt.h drivers.h
 	$(CC) $(CFLAGS) -c vt.c -o vt.o

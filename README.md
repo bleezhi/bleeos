@@ -32,7 +32,7 @@ Boot flow: `boot.asm` (16-bit ASM MBR) → `kernel_entry.asm` (ASM: A20, GDT,
 
 ## Shell commands
 
-`help man echo printf clear uname whoami hostname ver pwd ls cd mkdir touch rm cat env export unset sleep uptime date history true false test exit reboot halt poweroff gui vgaregs`
+`help man echo printf clear uname whoami hostname ver pwd ls cd mkdir touch rm cat env export unset sleep uptime date history true false test exit reboot halt poweroff gui vgaregs curl`
 
 `exit` (or Ctrl+D on an empty line) drops back to the boot manager.
 
@@ -98,11 +98,15 @@ red screen + serial dump and halt (used for impossible driver states,
 e.g. bad ATA sector counts). Faults print vector + error
 over serial/VGA instead of triple-faulting.
 
-## Network (`net`, `ping`)
+## Network (`net`, `ping`, `curl`)
 E1000 driver (82540EM, MMIO, polled rings, DMA above 1MB) with
 static SLIRP-LAN config (10.0.2.15/24, gateway 10.0.2.2), an ARP
 cache, and ICMP echo. `run-net` attaches `-device e1000` on
-user-mode networking; `ping 10.0.2.2` answers. No DHCP/DNS/TCP yet.
+user-mode networking; `ping 10.0.2.2` answers. On top: a DNS
+resolver (SLIRP forwarder 10.0.2.3, CNAME chase), a minimal
+blocking TCP client (SYN/MSS, retransmit, in-order 2KB buffer,
+FIN close), and HTTP/1.0 GET — `curl example.com` prints the
+page. No DHCP/TCP-server yet.
 
 ## Kernel core (IDT, timer, heap, PCI)
 Interrupts are on: 8259 PIC remapped (IRQs at 32..47), PIT at
