@@ -918,11 +918,6 @@ static const char MAN_REBOOT[] = "reboot - reboot the machine\nUsage: reboot\n";
 static const char MAN_HALT[] =
     "halt/poweroff - halt the CPU\nUsage: halt\n";
 static const char MAN_VER[] = "ver - OS version\nUsage: ver\n";
-static const char MAN_AAP[] =
-    "aap - ASCII animation editor\nUsage: aap\n"
-    "Keyboard editor: arrows move, printable keys draw, Del erases.\n"
-    "N/B change frames, D duplicates, C clears, P previews,\n"
-    "S saves to /aap, L loads from /aap, Esc quits.\n";
 static const char MAN_FETCH[] =
     "fetch - system info (logo + detected CPU/RAM/GPU/disk)\nUsage: fetch\n"
     "Everything shown is probed live: CPUID brand/cache, TSC\n"
@@ -945,8 +940,9 @@ static const char MAN_VGAREGS[] =
     "Prints MISC/SEQ/CRTC/GC/AC/DAC for debugging text mode.\n";
 static const char MAN_INSTALL[] =
     "install - Debian-like OS installer (TUI)\nUsage: install\n"
-    "Stepped wizard (root only): welcome, hostname, root\n"
-    "password, optional user, disk confirm, progress bar.\n"
+    "Stepped wizard (root only): welcome, hostname,\n"
+    "root password, optional user, disk confirm with\n"
+    "firmware (UEFI/BIOS) choice, progress bar.\n"
     "Writes a universal image to the ATA primary master:\n"
     "BIOS MBR + stage2 and a UEFI ESP (BOOTX64.EFI +\n"
     "kernel), so the disk boots on BIOS and UEFI.\n"
@@ -1158,6 +1154,7 @@ extern u8 _binary_boot_bin_end[];
 static int b_install(int argc, char **argv, const char *in) {
     (void)argc; (void)argv; (void)in;
     ata_dev_t d;
+    int inst_uefi = uefi_active();   /* firmware picked at confirm */
     if (sh_in_term()) {
         sh_eprint("install: use the text console (needs full 80 cols)\n");
         return 1;
@@ -1206,6 +1203,9 @@ static int b_install(int argc, char **argv, const char *in) {
             return 1;
         }
     }
+    /* 1b. firmware is chosen on the confirm screen (step 5):
+     * the image is universal, so either pick installs the
+     * same bytes; the pick is echoed at the end. */
     /* 2. hostname */
     {
         static char hn[32], cur[64];
@@ -1273,13 +1273,14 @@ static int b_install(int argc, char **argv, const char *in) {
             smemset(nw, 0, sizeof(nw));
         }
     }
-    /* 5. disk confirm */
+    /* 5. disk confirm + firmware option: UEFI/BIOS buttons pick
+     * how you will boot (the bytes are identical either way) */
     {
-        static char body[160], sz[16];
+        static char body[220], sz[16];
         static const char *btns[] = {
-            "Erase disk and install", "Go back"
+            "Install (UEFI)", "Install (BIOS)", "Go back"
         };
-        int i = 0;
+        int i = 0, r;
         const char *t = "Target: ";
         while (*t) body[i++] = *t++;
         for (int k = 0; d.model[k] && i < 100; k++) body[i++] = d.model[k];
@@ -1287,10 +1288,17 @@ static int b_install(int argc, char **argv, const char *in) {
         while (*t) body[i++] = *t++;
         sutoa(d.sectors / 2048, sz, 10, 0);
         for (int k = 0; sz[k] && i < 120; k++) body[i++] = sz[k];
-        t = " MB)\nALL DATA ON IT WILL BE DESTROYED.";
-        while (*t) body[i++] = *t++;
+        t = " MB)\nDetected: ";
+        while (*t && i < 150) body[i++] = *t++;
+        t = uefi_active() ? "UEFI" : "BIOS (legacy)";
+        while (*t && i < 170) body[i++] = *t++;
+        t = ".\nALL DATA ON IT WILL BE DESTROYED.";
+        while (*t && i < 210) body[i++] = *t++;
         body[i] = 0;
-        if (tui_dialog("Target disk", body, btns, 2) != 0) {
+        r = tui_dialog("Target disk", body, btns, 3);
+        if (r == 0) inst_uefi = 1;
+        else if (r == 1) inst_uefi = 0;
+        else {
             vga_clear();
             sh_print("Aborted.\n");
             return 1;
@@ -1301,13 +1309,27 @@ static int b_install(int argc, char **argv, const char *in) {
     tui_progress("Installing", "Writing system...");
     {
         /* freeze the live stage2: bss/data mutate, so the write and
-         * verify passes must render from a snapshot, not live RAM */
-        extern char __bss_end;
-        u8 *snap = (u8 *)(((u32)&__bss_end + 0xFFFu) & ~0xFFFu);
-        if (snap + (u32)STAGE2_SECTORS * 512u >= (u8 *)0x78000u) {
-            tui_msg("Error", "image too big for scratch");
-            vga_clear();
-            return 1;
+         * verify passes must render from a snapshot, not live RAM.
+         * Low RAM is full (.bss ends near 0x59000, heap at 0x78000),
+         * so the snapshot lives at 1MB. Probe it first: without
+         * paging, absent RAM reads back garbage instead of
+         * faulting, and the E820 total is only a sum, so a
+         * write/read pattern test is the honest check. */
+        u8 *snap = (u8 *)0x100000u;
+        {
+            int ok = 1;
+            for (u32 a = 0; a < (u32)STAGE2_SECTORS * 512u; a += 16384u) {
+                volatile u8 *p = snap + a;
+                p[0] = 0xA5; p[1] = 0x5A;
+                if (p[0] != 0xA5 || p[1] != 0x5A) { ok = 0; break; }
+                p[0] = 0x5A; p[1] = 0xA5;
+                if (p[0] != 0x5A || p[1] != 0xA5) { ok = 0; break; }
+            }
+            if (!ok) {
+                tui_msg("Error", "scratch RAM unavailable");
+                vga_clear();
+                return 1;
+            }
         }
         for (u32 i = 0; i < (u32)STAGE2_SECTORS * 512u; i++)
             snap[i] = ((const u8 *)0x7E00u)[i];
@@ -1364,8 +1386,10 @@ static int b_install(int argc, char **argv, const char *in) {
     {
         static const char *btns[] = { "Reboot now", "Back to shell" };
         tui_msg("Installation complete",
-                "BleeOS is on the disk (BIOS + UEFI bootable).\n"
-                "Boot it without the install media.");
+                inst_uefi ? "BleeOS is on the disk (BIOS + UEFI bootable).\n"
+                    "Boot it without the install media via UEFI."
+                    : "BleeOS is on the disk (BIOS + UEFI bootable).\n"
+                    "Boot it without the install media via BIOS.");
         if (tui_dialog("Finished", "Reboot into the new system?",
                        btns, 2) == 0)
             reboot();
