@@ -3,6 +3,7 @@
 #include "wm.h"
 #include "gfx.h"
 #include "drivers.h"
+#include "shell.h"
 
 #define INK RGB(20, 20, 20)
 #define BTN RGB(60, 120, 220)
@@ -229,11 +230,15 @@ void apps_open_demo(void) {
 void apps_window_closed(int id) {
     apps_doom_closed(id);
     apps_term_closed(id);
+    apps_aap_closed(id);
+    apps_filer_closed(id);
 }
 
 void apps_session_reset(void) {
     apps_doom_reset();
     apps_term_reset();
+    apps_aap_reset();
+    apps_filer_reset();
 }
 
 /* ---------- Calculator (integer) ---------- */
@@ -533,3 +538,268 @@ void apps_open_display(void) {
     disp_win = wm_open("Display", 180, 140, disp_width(), disp_height(),
                        disp_draw, disp_click, 0);
 }
+
+/* ---------- File Explorer ---------- */
+#define FILER_MAX_ENTRIES 64
+
+typedef struct {
+    char name[32];
+    int is_dir;
+    int size;
+    int fs_idx;   /* index into fs[], -1 for the ".." pseudo-entry */
+} filer_entry_t;
+
+typedef struct {
+    int parent_idx;  /* index in fs of shown dir, 0 for root */
+    int cur;         /* selected entry index */
+    int top;         /* first visible entry */
+    int count;       /* number of entries */
+    filer_entry_t entries[FILER_MAX_ENTRIES];
+} filer_state_t;
+
+#define FILER_ROW_H 20
+#define FILER_PATH_H 20
+
+static filer_state_t filer;
+static win_t *filer_win;
+
+static void filer_refresh(void) {
+    int parent = filer.parent_idx;
+    filer.count = 0;
+    filer.cur = 0;
+    filer.top = 0;
+
+    /* ".." pseudo-entry when not at root */
+    if (parent != 0 && filer.count < FILER_MAX_ENTRIES) {
+        filer.entries[filer.count].name[0] = '.';
+        filer.entries[filer.count].name[1] = '.';
+        filer.entries[filer.count].name[2] = 0;
+        filer.entries[filer.count].is_dir = 1;
+        filer.entries[filer.count].size = 0;
+        filer.entries[filer.count].fs_idx = -1;
+        filer.count++;
+    }
+
+    /* children of parent; skip the dir itself (fs[0].parent == 0). */
+    for (int i = 0; i < FS_MAX && filer.count < FILER_MAX_ENTRIES; i++) {
+        if (!fs[i].used) continue;
+        if (fs[i].parent != parent) continue;
+        if (i == parent) continue;
+        int k = 0;
+        while (fs[i].name[k] && k < 31) {
+            filer.entries[filer.count].name[k] = fs[i].name[k];
+            k++;
+        }
+        filer.entries[filer.count].name[k] = 0;
+        filer.entries[filer.count].is_dir = fs[i].is_dir;
+        filer.entries[filer.count].size = fs[i].size;
+        filer.entries[filer.count].fs_idx = i;
+        filer.count++;
+    }
+}
+
+/* keep selection on screen after cur moves */
+static void filer_ensure_visible(int visible) {
+    if (visible < 1) visible = 1;
+    if (filer.cur < filer.top) filer.top = filer.cur;
+    if (filer.cur >= filer.top + visible) filer.top = filer.cur - visible + 1;
+    if (filer.top < 0) filer.top = 0;
+}
+
+/* enter the selected entry: ".." goes up, dirs descend, files select-only */
+static void filer_open_cur(void) {
+    if (filer.count == 0) return;
+    if (filer.cur < 0 || filer.cur >= filer.count) return;
+    filer_entry_t *e = &filer.entries[filer.cur];
+    if (!e->is_dir) return;   /* files: nothing to open in the GUI */
+    if (e->fs_idx < 0) {
+        if (filer.parent_idx != 0)
+            filer.parent_idx = fs[filer.parent_idx].parent;
+    } else {
+        filer.parent_idx = e->fs_idx;
+    }
+    filer_refresh();
+    wm_dirty();
+}
+
+static void filer_path(char *out, int cap) {
+    /* collect chain root->leaf, then print forward */
+    int chain[16];
+    int depth = 0;
+    int idx = filer.parent_idx;
+    while (idx > 0 && depth < 16) {
+        chain[depth++] = idx;
+        idx = fs[idx].parent;
+    }
+    int p = 0;
+    if (cap > 1) out[p++] = '/';
+    for (int d = depth - 1; d >= 0; d--) {
+        const char *n = fs[chain[d]].name;
+        for (int k = 0; n[k] && p + 1 < cap; k++) out[p++] = n[k];
+        if (d > 0 && p + 1 < cap) out[p++] = '/';
+    }
+    out[p] = 0;
+}
+
+static void format_size(char *buf, int size) {
+    if (size < 1024) {
+        utoa10((u32)size, buf);
+        return;
+    }
+    {
+        int kb = (size + 511) / 1024;
+        if (kb < 1024) {
+            utoa10((u32)kb, buf);
+            int len = 0;
+            while (buf[len]) len++;
+            buf[len++] = 'K'; buf[len++] = 'B'; buf[len] = 0;
+            return;
+        }
+        {
+            int mb = (kb + 511) / 1024;
+            if (mb < 1024) {
+                utoa10((u32)mb, buf);
+                int len = 0;
+                while (buf[len]) len++;
+                buf[len++] = 'M'; buf[len++] = 'B'; buf[len] = 0;
+                return;
+            }
+            {
+                int gb = (mb + 511) / 1024;
+                utoa10((u32)gb, buf);
+                int len = 0;
+                while (buf[len]) len++;
+                buf[len++] = 'G'; buf[len++] = 'B'; buf[len] = 0;
+            }
+        }
+    }
+}
+
+static int filer_visible_rows(win_t *w) {
+    int H = w->h - TITLE_H - BORDER - FILER_PATH_H;
+    int v = H / FILER_ROW_H;
+    return v > 0 ? v : 1;
+}
+
+static void filer_draw(win_t *w, int cx, int cy) {
+    int cw = w->w - 2 * BORDER;
+    int visible = filer_visible_rows(w);
+    int end = filer.top + visible;
+    if (end > filer.count) end = filer.count;
+
+    /* path bar */
+    {
+        char path[64];
+        filer_path(path, sizeof path);
+        gfx_text(cx + 4, cy + 2, path, RGB(20, 20, 20), GFX_TRANS);
+    }
+
+    /* entries */
+    for (int i = filer.top; i < end; i++) {
+        int ry = FILER_PATH_H + (i - filer.top) * FILER_ROW_H;
+        int sel = (i == filer.cur);
+        filer_entry_t *e = &filer.entries[i];
+        gfx_fill(cx + 2, cy + ry, cw - 14, FILER_ROW_H,
+                 sel ? RGB(40, 160, 70) : RGB(255, 255, 255));
+        if (e->is_dir) {
+            gfx_text(cx + 6, cy + ry + 4, "[DIR] ", INK, GFX_TRANS);
+            gfx_text(cx + 50, cy + ry + 4, e->name, INK, GFX_TRANS);
+        } else {
+            char sz[16];
+            format_size(sz, e->size);
+            gfx_text(cx + 6, cy + ry + 4, e->name, INK, GFX_TRANS);
+            gfx_text(cx + cw - 14 - gfx_textw(sz) - 6, cy + ry + 4, sz,
+                     RGB(100, 100, 100), GFX_TRANS);
+        }
+    }
+    if (filer.count == 0)
+        gfx_text(cx + 6, cy + FILER_PATH_H + 4, "(empty)",
+                 RGB(120, 120, 120), GFX_TRANS);
+
+    /* scrollbar */
+    if (filer.count > visible) {
+        int sb_x = cx + cw - 12;
+        int sb_y = cy + FILER_PATH_H;
+        int sb_h = visible * FILER_ROW_H;
+        int range = filer.count - visible;
+        int thumb_off = range ? (filer.top * (sb_h - FILER_ROW_H)) / range : 0;
+        gfx_fill(sb_x, sb_y, 10, sb_h, RGB(220, 220, 220));
+        gfx_fill(sb_x, sb_y + thumb_off, 10, FILER_ROW_H,
+                 RGB(60, 120, 220));
+    }
+}
+
+/* NOTE: wm passes client-relative coords (x,y from client origin) and
+ * only forwards left-button clicks (right click opens the desktop menu),
+ * so navigation must work with left clicks alone: clicking a directory
+ * (or "..") enters it, clicking a file selects it. */
+static void filer_click(win_t *w, int x, int y, int btn) {
+    (void)x; (void)btn;
+    if (y < FILER_PATH_H) return;   /* path bar */
+    int visible = filer_visible_rows(w);
+    int row = (y - FILER_PATH_H) / FILER_ROW_H;
+    if (row < 0 || row >= visible) return;
+    int idx = filer.top + row;
+    if (idx < 0 || idx >= filer.count) return;
+    filer.cur = idx;
+    filer_ensure_visible(visible);
+    if (filer.entries[idx].is_dir)
+        filer_open_cur();
+    else
+        wm_dirty();
+}
+
+int apps_filer_key(int k) {
+    if (!filer_win || !filer_win->used) return 0;
+    if (k == KEY_UP) {
+        if (filer.cur > 0) {
+            filer.cur--;
+            filer_ensure_visible(filer_visible_rows(filer_win));
+            wm_dirty();
+        }
+        return 1;
+    }
+    if (k == KEY_DOWN) {
+        if (filer.cur + 1 < filer.count) {
+            filer.cur++;
+            filer_ensure_visible(filer_visible_rows(filer_win));
+            wm_dirty();
+        }
+        return 1;
+    }
+    if (k == '\n') {
+        filer_open_cur();
+        return 1;
+    }
+    if (k == '\b') {
+        if (filer.parent_idx != 0) {
+            filer.parent_idx = fs[filer.parent_idx].parent;
+            filer_refresh();
+            wm_dirty();
+        }
+        return 1;
+    }
+    return 0;
+}
+
+void apps_filer_closed(int id) {
+    if (filer_win && filer_win->id == id) filer_win = 0;
+}
+
+void apps_filer_reset(void) {
+    filer_win = 0;
+    filer.parent_idx = 0;
+    filer.cur = filer.top = filer.count = 0;
+}
+
+void apps_open_filer(void) {
+    if (filer_win && filer_win->used) return;  /* one explorer at a time */
+    filer.parent_idx = 0;
+    filer_refresh();
+    filer_win = wm_open("File Explorer", 100, 80, 420, 350,
+                        filer_draw, filer_click, 0);
+}
+
+
+
+

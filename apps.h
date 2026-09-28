@@ -26,5 +26,9 @@ void apps_doom_reset(void);      /* fresh login session */
 void apps_term_reset(void);
 void apps_window_closed(int id);  /* wm closed a window (X button) */
 void apps_session_reset(void);    /* fresh login session */
+void apps_open_filer(void);       /* file explorer */
+int  apps_filer_key(int k);        /* file explorer: 1 = key consumed */
+void apps_filer_closed(int id);
+void apps_filer_reset(void);
 
 #endif

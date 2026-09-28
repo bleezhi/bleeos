@@ -15,6 +15,7 @@
 #include "net.h"
 #include "heap.h"
 #include "fetch.h"
+#include "apps.h"
 
 /* ================= string helpers ================= */
 static void scpy(char *d, const char *s) { while ((*d++ = *s++)) ; }
@@ -118,11 +119,8 @@ static int env_unset(const char *name) {
 }
 
 /* ================= ramfs ================= */
-#define FS_MAX 96
-#define FS_DATA 768
-typedef struct { u8 used, is_dir; char name[24]; u8 parent; u16 size; char data[FS_DATA]; } fsnode_t;
-static fsnode_t fs[FS_MAX];
-static char cwd[64];
+fsnode_t fs[FS_MAX];
+char cwd[64];
 
 static int fs_child(u8 parent, const char *name) {
     for (int i = 0; i < FS_MAX; i++)
@@ -862,6 +860,7 @@ static int b_poweroff(int argc, char **argv, const char *in) {
 }
 static int b_gui(int argc, char **argv, const char *in);
 static int b_install(int argc, char **argv, const char *in);
+static int b_filer(int argc, char **argv, const char *in);
 static int b_logout(int argc, char **argv, const char *in);
 static int b_su(int argc, char **argv, const char *in);
 static int b_passwd(int argc, char **argv, const char *in);
@@ -976,6 +975,11 @@ static const char MAN_PING[] =
     "ping - ICMP echo\nUsage: ping IP [COUNT]\n"
     "Sends echo requests (default 4, max 8), ARPs as needed.\n"
     "Only the local /24 is reachable (try the gateway).\n";
+static const char MAN_FILER[] =
+    "filer - file explorer\nUsage: filer\n"
+    "Interactive file explorer with directory navigation.\n"
+    "Click a directory (or ..) to enter it, click a file to select.\n"
+    "Up/Down: select, Enter: open, Backspace: parent directory\n";
 static const char MAN_RUN[] =
     "run - execute a script file\nUsage: run FILE\n"
     "Runs each line as a shell command (skips blanks and\n"
@@ -1057,6 +1061,7 @@ static const cmd_t cmds[] = {
     {"mem", "heap stats", MAN_MEM, b_mem},
     {"net", "network status", MAN_NET, b_net},
     {"ping", "ICMP echo", MAN_PING, b_ping},
+    {"filer", "file explorer", MAN_FILER, b_filer},
     {0, 0, 0, 0},
 };
 
@@ -1366,6 +1371,12 @@ static int b_install(int argc, char **argv, const char *in) {
             reboot();
         vga_clear();
     }
+    return 0;
+}
+
+static int b_filer(int argc, char **argv, const char *in) {
+    (void)argc; (void)argv; (void)in;
+    apps_open_filer();
     return 0;
 }
 

@@ -197,14 +197,13 @@ static void ring_reset(ring_t *r, trb_t *t, int n) {
     r->enq = 0;
     r->cyc = 1;
 }
-/* TEMPORARY EXPERIMENT (revert after test): run interrupt rings at
- * producer cycle 0 (DCS=0) to test whether QEMU's per-EP expected
- * cycle is stuck at 0 for reconfigured EPs (matching cyc=1 works
- * for SeaBIOS-fresh EPs and for our EP0, but not our EP3). */
+/* Interrupt rings must start at cycle=1 to match endpoint DCS=1
+ * (set in endpoint context DW3 bit 0). SeaBIOS leaves DCS=1 for
+ * all EPs; we set DCS=1 in endpoint context DW3 bit 0, so the
+ * first TRB must have cycle=1. */
 static void ring_reset0(ring_t *r, trb_t *t, int n) {
     ring_reset(r, t, n);
-    r->cyc = 0;
-    r->t[n].d = TRB_T_LINK | TRB_LINK_TC;
+    r->cyc = 1;
 }
 static trb_t *ring_put(ring_t *r, u32 a, u32 b, u32 c, u32 d) {
     trb_t *t = &r->t[r->enq];
@@ -788,15 +787,16 @@ int xhci_enumerate_port(int p, int index) {
          * EP0 bytes here even though EP0 is not being configured). */
         /* EP contexts mirror SeaBIOS's proven-good encoding: plain
          * interval/type/MPS/ring/avg, no CErr or ESIT extras (either
-         * of those draws code 5 from QEMU here). */
+         * of those draws code 5 from QEMU here).  Ring pointer LSB
+         * (DCS) must be 1 because our producer cycles start at 1. */
         if (kep)
             ctx_wr(kep * 2 + 1, (u32)fs_interval(10) << 16,
                    EP_TYPE_INT_IN | ((u32)kmps << 16),
-                   phys(x->kbd.t), 8);
+                   phys(x->kbd.t) | 1u, 8);
         if (mep)
             ctx_wr(mep * 2 + 1, (u32)fs_interval(10) << 16,
                    EP_TYPE_INT_IN | ((u32)mmps << 16),
-                   phys(x->mse.t), 8);
+                   phys(x->mse.t) | 1u, 8);
         /* TEMPORARY: dump EP3 input dwords (guest-side truth) */
         if (kep) {
             u32 *epc = ictx(kep * 2 + 1);
@@ -834,7 +834,7 @@ int xhci_enumerate_port(int p, int index) {
             u32 *p = (u32 *)(base + (1 + (u32)kep) * (u32)ctx_size);
             p[0] = ((u32)fs_interval(10) << 16) | 1u;
             p[1] = EP_TYPE_INT_IN | ((u32)kmps << 16);
-            p[2] = (u32)phys(x->kbd.t);
+            p[2] = (u32)phys(x->kbd.t) | 1u;
             p[3] = 0;
             p[4] = kmps;
         }
@@ -842,7 +842,7 @@ int xhci_enumerate_port(int p, int index) {
             u32 *p = (u32 *)(base + (1 + (u32)mep) * (u32)ctx_size);
             p[0] = ((u32)fs_interval(10) << 16) | 1u;
             p[1] = EP_TYPE_INT_IN | ((u32)mmps << 16);
-            p[2] = (u32)phys(x->mse.t);
+            p[2] = (u32)phys(x->mse.t) | 1u;
             p[3] = 0;
             p[4] = mmps;
         }
@@ -864,6 +864,60 @@ static void queue_intr(xdev_t *x, ring_t *ring, int dci, void *buf,
              TRB_T_NORMAL | TRB_IOC);
     rw(db + (u32)x->slot * 4u, (u32)dci);
 }
+/* ---- runtime completion demux ----
+ * Keyboard + mouse (+ a second device) share one event ring. Letting
+ * each endpoint sift the ring itself eats the other endpoint's
+ * completions: the victim keeps queued=1 while its event is gone, so
+ * it wedges permanently (in the GUI both sides poll every frame; in
+ * the text shell only the keyboard polls, which is why USB input
+ * worked there but died in the GUI). One pump dispatches transfer
+ * events to per-endpoint slots instead. */
+static int k_done[2], m_done[2];
+static u32 k_code[2], m_code[2];
+static void hid_pump(void) {
+    u32 type, sl, dc, cc;
+    while (ev_next(&type, &sl, &dc, &cc)) {
+        trb_t *e;
+        if (type != EV_TRANSFER)
+            continue;   /* command/port changes: consumed, ignored */
+        e = &event_ring[(ev_idx + EV_N - 1) % EV_N];
+        for (int i = 0; i < 2; i++) {
+            if (!devs[i].used)
+                continue;
+            if (k_queued[i] && !k_done[i] && devs[i].kbd_dci &&
+                sl == (u32)devs[i].slot && dc == (u32)devs[i].kbd_dci &&
+                e->a == k_last[i]) {
+                k_done[i] = 1;
+                k_code[i] = cc;
+                break;
+            }
+            if (m_queued[i] && !m_done[i] && devs[i].mse_dci &&
+                sl == (u32)devs[i].slot && dc == (u32)devs[i].mse_dci &&
+                e->a == m_last[i]) {
+                m_done[i] = 1;
+                m_code[i] = cc;
+                break;
+            }
+        }
+    }
+}
+/* re-arm an endpoint after consuming its completion (flags included:
+ * the old code re-queued without setting queued, stacking two
+ * transfers on one endpoint and dropping every other report) */
+static void kbd_requeue(int index) {
+    xdev_t *x = &devs[index];
+    int len = x->kbd_mps > 8 ? 8 : x->kbd_mps;
+    queue_intr(x, &x->kbd, x->kbd_dci, kbuf[index], len, &k_last[index]);
+    k_queued[index] = 1;
+    k_done[index] = 0;
+}
+static void mse_requeue(int index) {
+    xdev_t *x = &devs[index];
+    int len = x->mse_mps > 4 ? 4 : x->mse_mps;
+    queue_intr(x, &x->mse, x->mse_dci, mbuf[index], len, &m_last[index]);
+    m_queued[index] = 1;
+    m_done[index] = 0;
+}
 int xhci_hid_trykey(int index, int *out) {
     u32 st;
     xdev_t *x;
@@ -872,16 +926,16 @@ int xhci_hid_trykey(int index, int *out) {
         !devs[index].kbd_dci)
         return -1;
     x = &devs[index];
+    hid_pump();
     if (!k_queued[index]) {
-        int len = x->kbd_mps > 8 ? 8 : x->kbd_mps;
-        queue_intr(x, &x->kbd, x->kbd_dci, kbuf[index], len,
-                   &k_last[index]);
-        k_queued[index] = 1;
+        kbd_requeue(index);
         return -1;
     }
-    if (!xfer_poll((u32)x->slot, (u32)x->kbd_dci, k_last[index], &st))
+    if (!k_done[index])
         return -1;
     k_queued[index] = 0;
+    k_done[index] = 0;
+    st = k_code[index];
     if (st != COMP_SUCCESS && st != COMP_SHORT)
         return -1;
     r = kbuf[index];
@@ -899,77 +953,62 @@ int xhci_hid_trykey(int index, int *out) {
                 held = 1;
         if (held)
             continue;
-        x->prev[i] = k;
+        /* sync to the full report (positional tracking repeats keys
+         * when one of several held keys is released) */
+        for (int j = 0; j < 6; j++) x->prev[j] = r[2 + j];
         if (k == 0x39) {
             x->caps = !x->caps;
-            int len = x->kbd_mps > 8 ? 8 : x->kbd_mps;
-            queue_intr(x, &x->kbd, x->kbd_dci, kbuf[index], len, &k_last[index]);
-            return 0;
+            kbd_requeue(index);
+            return -1;   /* caps consumed: no key to deliver */
         }
         if (k == 0x4f) {
             *out = 0x103;
-            int len = x->kbd_mps > 8 ? 8 : x->kbd_mps;
-            queue_intr(x, &x->kbd, x->kbd_dci, kbuf[index], len, &k_last[index]);
+            kbd_requeue(index);
             return 0;
         }
         if (k == 0x50) {
             *out = 0x102;
-            int len = x->kbd_mps > 8 ? 8 : x->kbd_mps;
-            queue_intr(x, &x->kbd, x->kbd_dci, kbuf[index], len, &k_last[index]);
+            kbd_requeue(index);
             return 0;
         }
         if (k == 0x51) {
             *out = 0x101;
-            int len = x->kbd_mps > 8 ? 8 : x->kbd_mps;
-            queue_intr(x, &x->kbd, x->kbd_dci, kbuf[index], len, &k_last[index]);
+            kbd_requeue(index);
             return 0;
         }
         if (k == 0x52) {
             *out = 0x100;
-            int len = x->kbd_mps > 8 ? 8 : x->kbd_mps;
-            queue_intr(x, &x->kbd, x->kbd_dci, kbuf[index], len, &k_last[index]);
+            kbd_requeue(index);
             return 0;
         }
         if (k == 0x4a) {
             *out = 0x104;
-            int len = x->kbd_mps > 8 ? 8 : x->kbd_mps;
-            queue_intr(x, &x->kbd, x->kbd_dci, kbuf[index], len, &k_last[index]);
+            kbd_requeue(index);
             return 0;
         }
         if (k == 0x4d) {
-            *out = 0x104;
-            int len = x->kbd_mps > 8 ? 8 : x->kbd_mps;
-            queue_intr(x, &x->kbd, x->kbd_dci, kbuf[index], len, &k_last[index]);
+            *out = 0x105;   /* END (was 0x104/HOME) */
+            kbd_requeue(index);
             return 0;
         }
         if (k == 0x4c) {
             *out = 0x105;
-            int len = x->kbd_mps > 8 ? 8 : x->kbd_mps;
-            queue_intr(x, &x->kbd, x->kbd_dci, kbuf[index], len, &k_last[index]);
-            return 0;
-        }
-        if (k == 0x4c) {
-            *out = 0x106;
-            int len = x->kbd_mps > 8 ? 8 : x->kbd_mps;
-            queue_intr(x, &x->kbd, x->kbd_dci, kbuf[index], len, &k_last[index]);
+            kbd_requeue(index);
             return 0;
         }
         if (k == 0x29) {
             *out = 27;
-            int len = x->kbd_mps > 8 ? 8 : x->kbd_mps;
-            queue_intr(x, &x->kbd, x->kbd_dci, kbuf[index], len, &k_last[index]);
+            kbd_requeue(index);
             return 0;
         }
         if ((x->mod & 0x11) && k == 0x06) {
             *out = 3;
-            int len = x->kbd_mps > 8 ? 8 : x->kbd_mps;
-            queue_intr(x, &x->kbd, x->kbd_dci, kbuf[index], len, &k_last[index]);
+            kbd_requeue(index);
             return 0;
         }
         if ((x->mod & 0x11) && k == 0x07) {
             *out = 4;
-            int len = x->kbd_mps > 8 ? 8 : x->kbd_mps;
-            queue_intr(x, &x->kbd, x->kbd_dci, kbuf[index], len, &k_last[index]);
+            kbd_requeue(index);
             return 0;
         }
         {
@@ -1006,45 +1045,38 @@ int xhci_hid_trykey(int index, int *out) {
                 }
             if (ch) {
                 *out = (u8)ch;
-                int len = x->kbd_mps > 8 ? 8 : x->kbd_mps;
-                queue_intr(x, &x->kbd, x->kbd_dci, kbuf[index], len, &k_last[index]);
+                kbd_requeue(index);
                 return 0;
             }
         }
     }
     for (int i = 0; i < 6; i++)
-        if (!r[2 + i])
-            x->prev[i] = 0;
+        x->prev[i] = r[2 + i];
+    kbd_requeue(index);   /* no new key, but the transfer is consumed */
     return -1;
 }
 int xhci_hid_mouse(int index, int *dx, int *dy, int *btn) {
-    xdev_t *x;
     u32 st;
     u8 *r;
     if (!ready || index < 0 || index >= ndev || !devs[index].used ||
         !devs[index].mse_dci)
         return 0;
-    x = &devs[index];
+    hid_pump();
     if (!m_queued[index]) {
-        int len = x->mse_mps > 4 ? 4 : x->mse_mps;
-        queue_intr(x, &x->mse, x->mse_dci, mbuf[index], len,
-                   &m_last[index]);
-        m_queued[index] = 1;
+        mse_requeue(index);
         return 0;
     }
-    if (!xfer_poll((u32)x->slot, (u32)x->mse_dci, m_last[index], &st))
+    if (!m_done[index])
         return 0;
     m_queued[index] = 0;
+    m_done[index] = 0;
+    st = m_code[index];
     if (st != COMP_SUCCESS && st != COMP_SHORT)
         return 0;
     r = mbuf[index];
     *btn = r[0] & 7;
     *dx = (int)(signed char)r[1];
     *dy = -(int)(signed char)r[2];
-    {
-        int len = x->mse_mps > 4 ? 4 : x->mse_mps;
-        queue_intr(x, &x->mse, x->mse_dci, mbuf[index], len,
-                   &m_last[index]);
-    }
+    mse_requeue(index);
     return 1;
 }

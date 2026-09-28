@@ -4,6 +4,16 @@
 
 #include "drivers.h"
 
+/* Filesystem constants */
+#define FS_MAX 96
+#define FS_DATA 768
+
+/* Filesystem node type (ramfs) */
+typedef struct { u8 used, is_dir; char name[24]; u8 parent; u16 size; char data[FS_DATA]; } fsnode_t;
+
+extern fsnode_t fs[FS_MAX];  /* ramfs nodes */
+extern char cwd[64];         /* current working directory */
+
 void shell_run(u32 boot_sec, int verbose);
 const char *shell_hostname(void);
 const char *shell_cwd(void);     /* current working directory */

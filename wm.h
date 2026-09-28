@@ -4,6 +4,10 @@
 
 #include "drivers.h"
 
+/* Window constants */
+#define BORDER 2
+#define TITLE_H 20
+
 typedef struct win win_t;
 struct win {
     int used;

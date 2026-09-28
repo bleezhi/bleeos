@@ -35,10 +35,10 @@ static char wm_user[32] = "guest";
 
 /* right-click desktop menu */
 static int menu_open, menu_x, menu_y, menu_hover;
-#define MENU_N 8
+#define MENU_N 9
 static const char *menu_items[MENU_N] = {
     "Display settings", "Calculator", "ASCII Animator", "Doom clone", "Terminal",
-    "Reboot", "Power off", "Log out",
+    "File explorer", "Reboot", "Power off", "Log out",
 };
 #define MENU_W 200
 #define MENU_H (MENU_N * 22 + 8)
@@ -254,6 +254,7 @@ static void menu_action(int idx) {
     extern void apps_open_aap(void);
     extern void apps_open_doom(void);
     extern void apps_open_term(void);
+    extern void apps_open_filer(void);
     menu_open = 0;
     dirty = 1;
     if (idx == 0) apps_open_display();
@@ -261,9 +262,10 @@ static void menu_action(int idx) {
     else if (idx == 2) apps_open_aap();
     else if (idx == 3) apps_open_doom();
     else if (idx == 4) apps_open_term();
-    else if (idx == 5) reboot();
-    else if (idx == 6) halt_cpu();
-    else if (idx == 7) quit = 1;    /* log out -> login screen */
+    else if (idx == 5) apps_open_filer();
+    else if (idx == 6) reboot();
+    else if (idx == 7) halt_cpu();
+    else if (idx == 8) quit = 1;    /* log out -> login screen */
 }
 
 static int menu_hit(int x, int y) {
@@ -329,6 +331,7 @@ void wm_run(void) {
     extern int apps_term_active(void);
     extern int apps_term_busy(void);
     extern int apps_aap_key(int k);
+    extern int apps_filer_key(int k);
     int last_btn = 0;
     u32 last_sec = rtc_seconds();
     for (int i = 0; i < MAXWIN; i++) wins[i].used = 0;  /* fresh session */
@@ -382,6 +385,8 @@ void wm_run(void) {
             /* game window ate it (Esc there closes the game) */
         } else if (k != -1 && apps_aap_key(k)) {
             /* ASCII animator owns printable/navigation keys while open */
+        } else if (k != -1 && apps_filer_key(k)) {
+            /* file explorer owns Up/Down/Enter/Backspace while open */
         } else if (k != -1 && apps_term_active() && apps_term_key(k)) {
             /* terminal ate it (Esc falls through: logs out) */
         } else if (k == 27) {
