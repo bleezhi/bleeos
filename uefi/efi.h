@@ -27,6 +27,21 @@ typedef struct {
     u8 Data4[8];
 } EFI_GUID;
 
+/* ---------- console input ---------- */
+struct EFI_SIMPLE_TEXT_INPUT_PROTOCOL;
+typedef struct {
+    u16 ScanCode;
+    CHAR16 UnicodeChar;
+} EFI_INPUT_KEY;
+typedef EFI_STATUS (EFIAPI *EFI_INPUT_READ_KEY)(
+    struct EFI_SIMPLE_TEXT_INPUT_PROTOCOL *This, EFI_INPUT_KEY *Key);
+typedef struct EFI_SIMPLE_TEXT_INPUT_PROTOCOL {
+    void *Reset;
+    EFI_INPUT_READ_KEY ReadKeyStroke;
+    void *WaitForKey;
+} EFI_SIMPLE_TEXT_INPUT_PROTOCOL;
+#define EFI_NOT_READY (EFI_ERROR_MASK | 6)
+
 /* ---------- console ---------- */
 struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL;
 typedef EFI_STATUS (EFIAPI *EFI_TEXT_STRING)(
@@ -70,6 +85,12 @@ typedef EFI_STATUS (EFIAPI *EFI_EXIT_BOOT_SERVICES)(
 typedef EFI_STATUS (EFIAPI *EFI_STALL)(UINTN Microseconds);
 typedef EFI_STATUS (EFIAPI *EFI_SET_WATCHDOG_TIMER)(
     UINTN Timeout, u64 WatchdogCode, UINTN DataSize, CHAR16 *WatchdogData);
+typedef EFI_STATUS (EFIAPI *EFI_IMAGE_LOAD)(
+    int BootPolicy, EFI_HANDLE ParentImageHandle, void *FilePath,
+    void *SourceBuffer, UINTN SourceSize, EFI_HANDLE *ImageHandle);
+typedef EFI_STATUS (EFIAPI *EFI_IMAGE_START)(
+    EFI_HANDLE ImageHandle, UINTN *ExitDataSize, CHAR16 **ExitData);
+typedef EFI_STATUS (EFIAPI *EFI_IMAGE_UNLOAD)(EFI_HANDLE ImageHandle);
 
 typedef struct EFI_BOOT_SERVICES {
     void *Hdr[3];              /* EFI_TABLE_HEADER: u64 + u32 + u32 + u32 + u32 */
@@ -95,10 +116,10 @@ typedef struct EFI_BOOT_SERVICES {
     void *LocateHandle;
     void *LocateDevicePath;
     void *InstallConfigurationTable;
-    void *LoadImage;
-    void *StartImage;
+    EFI_IMAGE_LOAD LoadImage;
+    EFI_IMAGE_START StartImage;
     void *Exit;
-    void *UnloadImage;
+    EFI_IMAGE_UNLOAD UnloadImage;
     EFI_EXIT_BOOT_SERVICES ExitBootServices;
     void *GetNextMonotonicCount;
     EFI_STALL Stall;
@@ -131,7 +152,7 @@ typedef struct {
     u32 FirmwareRevision;
     u32 __pad;
     EFI_HANDLE ConsoleInHandle;
-    void *ConIn;
+    EFI_SIMPLE_TEXT_INPUT_PROTOCOL *ConIn;
     EFI_HANDLE ConsoleOutHandle;
     EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *ConOut;
     EFI_HANDLE StandardErrorHandle;
@@ -147,7 +168,30 @@ typedef struct {
     EFI_HANDLE ParentHandle;
     EFI_SYSTEM_TABLE *SystemTable;
     EFI_HANDLE DeviceHandle;
+    void *FilePath;   /* device path of the loaded image */
+    void *Reserved;
+    UINTN LoadOptionsSize;
+    void *LoadOptions;
 } EFI_LOADED_IMAGE_PROTOCOL;
+
+/* ---------- device path node (generic header) ---------- */
+typedef struct {
+    u8 Type;
+    u8 SubType;
+    u8 Length[2];
+} EFI_DEVICE_PATH_NODE;
+#define DP_TYPE_MEDIA 4
+#define DP_SUBTYPE_FILEPATH 4
+#define DP_TYPE_END 0x7F
+#define DP_SUBTYPE_END 0xFF
+
+/* Device Path protocol */
+static EFI_GUID DevicePathGuid = {
+    0x09576E91, 0x6D3F, 0x11D2,
+    { 0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B }
+};
+typedef EFI_STATUS (EFIAPI *EFI_DEVICE_PATH_GET)(
+    EFI_HANDLE Handle, EFI_DEVICE_PATH_NODE **DevicePath);
 
 /* ---------- filesystem ---------- */
 struct EFI_FILE_PROTOCOL;

@@ -38,6 +38,35 @@ static EFI_SYSTEM_TABLE *ST;
 
 static void out(const CHAR16 *s) { ST->ConOut->OutputString(ST->ConOut, s); }
 
+/* serial mirror (COM1 UART, polled): makes the menu/chainload
+ * testable headless, since ConOut only reaches the GOP screen. */
+static u8 port_in(u16 p) {
+    u8 v;
+    __asm__ volatile ("inb %1, %0" : "=a"(v) : "Nd"(p));
+    return v;
+}
+static void port_out(u16 p, u8 v) {
+    __asm__ volatile ("outb %0, %1" :: "a"(v), "Nd"(p));
+}
+static void ser_putc(char c) {
+    int guard = 100000;
+    while (!(port_in(0x3FD) & 0x20) && guard--) { }
+    port_out(0x3F8, (u8)c);
+}
+static void ser_puts(const char *s) {
+    while (*s) {
+        if (*s == '\n') ser_putc('\r');
+        ser_putc(*s++);
+    }
+}
+static void ser_putn(int v) {
+    char b[12];
+    int i = 0, j;
+    if (!v) { ser_putc('0'); return; }
+    while (v && i < 11) { b[i++] = (char)('0' + v % 10); v /= 10; }
+    for (j = i - 1; j >= 0; j--) ser_putc(b[j]);
+}
+
 /* ASCII -> UEFI console (CHAR16, \\n -> \\r\\n). */
 static void puts_ascii(const char *s) {
     CHAR16 buf[129];
@@ -84,6 +113,289 @@ static void memcpy_bytes(void *d, const void *s, UINTN n) {
     for (UINTN i = 0; i < n; i++) x[i] = y[i];
 }
 
+/* ---------- other-OS picker (chainload .EFI from the ESP) ----------
+ * Scans \EFI subdirs for boot loaders besides ourselves and offers
+ * them with a 5s menu (BleeOS default). Single-OS ESPs boot straight
+ * through exactly like before. Picking another OS runs it via
+ * LoadImage/StartImage on a cloned device path; if it returns, we
+ * fall through to the normal BleeOS boot. */
+#define MAXBOOT 8
+typedef struct {
+    CHAR16 path[64];   /* \EFI\SUB\FILE.EFI */
+    char label[40];    /* SUB/FILE.EFI (ascii) */
+} bootopt_t;
+static bootopt_t bopts[MAXBOOT];
+static int nboots;
+
+static int ch16_len(const CHAR16 *s) {
+    int n = 0;
+    while (s[n] && n < 64) n++;
+    return n;
+}
+/* ascii, case-insensitive, 0 = equal */
+static int ch16_ieq(const CHAR16 *a, const char *b) {
+    int i = 0;
+    for (;;) {
+        CHAR16 ca = a[i];
+        char cb = b[i];
+        if (ca >= 'A' && ca <= 'Z') ca += 32;
+        if (cb >= 'A' && cb <= 'Z') cb += 32;
+        if (!ca || ca != (CHAR16)cb) return ca - (CHAR16)cb;
+        if (!ca) return 0;
+        i++;
+        if (i > 64) return 1;
+    }
+}
+static int ch16_ends_efi(const CHAR16 *s) {
+    int n = ch16_len(s);
+    if (n < 5) return 0;
+    return ch16_ieq(s + n - 4, ".efi") == 0;
+}
+/* our own file, from our device path's final FILEPATH node (for
+ * skipping ourselves in the scan); empty when unparseable */
+static void self_name(EFI_LOADED_IMAGE_PROTOCOL *Loaded, CHAR16 *out) {
+    u8 *p = (u8 *)Loaded->FilePath, *last = 0;
+    out[0] = 0;
+    if (!p) return;
+    for (int hops = 0; hops < 32; hops++) {
+        u8 type = p[0], sub = p[1];
+        u16 len = (u16)p[2] | ((u16)p[3] << 8);
+        if (type == DP_TYPE_END) break;
+        if (len < 4 || len > 512) break;
+        if (type == DP_TYPE_MEDIA && sub == DP_SUBTYPE_FILEPATH)
+            last = p;
+        p += len;
+    }
+    if (!last) return;
+    {
+        CHAR16 *s = (CHAR16 *)(last + 4);
+        int i = 0;
+        while (s[i] && i < 63) { out[i] = s[i]; i++; }
+        out[i] = 0;
+    }
+}
+
+/* read one dir entry's name; 0 ok, 1 end/error */
+static int dir_next(EFI_FILE_PROTOCOL *dir, CHAR16 *name, int *is_dir) {
+    static u8 info[600];
+    UINTN sz = sizeof(info);
+    EFI_STATUS st = dir->Read(dir, &sz, info);
+    u64 fsize;
+    int i;
+    if (st || !sz) return 1;
+    /* EFI_FILE_INFO: Size(8) FileSize(8) Physical(8) x3 EFI_TIME(16)
+     * ... Attribute u64 @72, FileName @80 */
+    if (sz < 82) return 1;
+    fsize = 0;
+    for (i = 0; i < 8; i++) fsize |= (u64)info[8 + i] << (i * 8);
+    (void)fsize;
+    *is_dir = (info[72] & 0x10) ? 1 : 0;
+    {
+        CHAR16 *s = (CHAR16 *)(info + 80);
+        int n = 0;
+        UINTN room = sz > 80 ? (sz - 80) / 2 : 0;
+        while (n < 63 && (UINTN)n < room && s[n]) { name[n] = s[n]; n++; }
+        name[n] = 0;
+    }
+    return 0;
+}
+
+/* full \EFI\SUB\FILE path + ascii label; 0 ok */
+static int join_efi_path(const CHAR16 *sub, const CHAR16 *file,
+                         CHAR16 *path, char *label) {
+    static const CHAR16 pre[] = { '\\', 'E', 'F', 'I', '\\', 0 };
+    int p = 0, l = 0, i;
+    for (i = 0; pre[i] && p < 60; i++) path[p++] = pre[i];
+    for (i = 0; sub[i] && p < 60; i++) path[p++] = sub[i];
+    if (p < 62) path[p++] = '\\';
+    for (i = 0; file[i] && p < 63; i++) path[p++] = file[i];
+    path[p] = 0;
+    for (i = 0; sub[i] && l < 20; i++) {
+        char c = (char)sub[i];
+        label[l++] = c;
+    }
+    if (l < 38) label[l++] = '/';
+    for (i = 0; file[i] && l < 39; i++) {
+        CHAR16 c = file[i];
+        label[l++] = (c < 128) ? (char)c : '?';
+    }
+    label[l] = 0;
+    return 0;
+}
+
+static int scan_efi(EFI_LOADED_IMAGE_PROTOCOL *Loaded,
+                    EFI_FILE_PROTOCOL *Root) {
+    EFI_FILE_PROTOCOL *Efi = 0, *Sub = 0;
+    CHAR16 self[64], sub[64], file[64], path[64];
+    char label[40];
+    int is_dir;
+    static const CHAR16 efi[] = { '\\', 'E', 'F', 'I', 0 };
+    nboots = 0;
+    self_name(Loaded, self);
+    if (Root->Open(Root, &Efi, efi, EFI_FILE_MODE_READ, 0))
+        return 0;
+    while (!dir_next(Efi, sub, &is_dir)) {
+        if (!is_dir) continue;
+        if (sub[0] == '.' && !sub[1]) continue;
+        if (sub[0] == '.' && sub[1] == '.' && !sub[2]) continue;
+        if (Sub) { Sub->Close(Sub); Sub = 0; }
+        if (Efi->Open(Efi, &Sub, sub, EFI_FILE_MODE_READ, 0))
+            continue;
+        while (!dir_next(Sub, file, &is_dir)) {
+            char ascii[64];
+            int i = 0, same;
+            if (is_dir || !ch16_ends_efi(file)) continue;
+            join_efi_path(sub, file, path, label);
+            /* skip ourselves (compare ascii, case-insensitive) */
+            while (path[i] && i < 63) {
+                CHAR16 c = path[i];
+                ascii[i] = (c < 128) ? (char)c : '?';
+                i++;
+            }
+            ascii[i] = 0;
+            same = self[0] && !ch16_ieq(self, ascii);
+            if (same) continue;   /* ourselves: not an option */
+            if (nboots < MAXBOOT) {
+                int i = 0;
+                while (path[i]) { bopts[nboots].path[i] = path[i]; i++; }
+                bopts[nboots].path[i] = 0;
+                i = 0;
+                while (label[i]) {
+                    bopts[nboots].label[i] = label[i];
+                    i++;
+                }
+                bopts[nboots].label[i] = 0;
+                nboots++;
+            }
+        }
+    }
+    if (Sub) Sub->Close(Sub);
+    Efi->Close(Efi);
+    return nboots;
+}
+
+/* 0 = BleeOS, else 1-based bopts index. Timeout defaults BleeOS. */
+static int boot_menu(EFI_BOOT_SERVICES *BS) {
+    EFI_SIMPLE_TEXT_INPUT_PROTOCOL *In = ST->ConIn;
+    int ticks = 50, i;
+    puts_ascii("\r\nBleeOS boot menu (Enter: BleeOS):\r\n");
+    puts_ascii("  0. BleeOS (this loader)\r\n");
+    for (i = 0; i < nboots; i++) {
+        char b[8];
+        b[0] = ' '; b[1] = ' '; b[2] = (char)('1' + i); b[3] = '.';
+        b[4] = ' '; b[5] = 0;
+        puts_ascii(b);
+        puts_ascii(bopts[i].label);
+        puts_ascii("\r\n");
+    }
+    if (!In) return 0;
+    while (ticks-- > 0) {
+        EFI_INPUT_KEY k;
+        EFI_STATUS st = In->ReadKeyStroke(In, &k);
+        if (!st) {
+            if (k.UnicodeChar == '\r') return 0;
+            if (k.UnicodeChar >= '0' && k.UnicodeChar <= '0' + nboots)
+                return (int)(k.UnicodeChar - '0');
+        }
+        BS->Stall(100000);
+    }
+    return 0;
+}
+
+/* run bopts[idx-1] via a cloned device path; returns on its exit */
+static void chain_boot(EFI_BOOT_SERVICES *BS, EFI_HANDLE Img,
+                       EFI_LOADED_IMAGE_PROTOCOL *Loaded, int idx) {
+    static u8 newpath[512];
+    u8 *p = (u8 *)Loaded->FilePath, *last = 0;
+    u8 *o = newpath;
+    UINTN prefix = 0;
+    EFI_HANDLE child = 0;
+    EFI_STATUS st;
+    int i, n;
+    if (!Loaded->FilePath) return;
+    for (int hops = 0; hops < 32 && p; hops++) {
+        u8 type = p[0], sub = p[1];
+        u16 len = (u16)p[2] | ((u16)p[3] << 8);
+        if (type == DP_TYPE_END) break;
+        if (len < 4) return;
+        if (type == DP_TYPE_MEDIA && sub == DP_SUBTYPE_FILEPATH)
+            last = p;
+        p += len;
+    }
+    if (!last) return;
+    prefix = (UINTN)(last - (u8 *)Loaded->FilePath);
+    u8 *base_path = 0;
+    UINTN base_len = 0;
+    if (prefix == 0) {
+        /* No hardware prefix in our FilePath; get it from DeviceHandle */
+        EFI_DEVICE_PATH_NODE *devpath = 0;
+        st = BS->HandleProtocol(Loaded->DeviceHandle, &DevicePathGuid,
+                                (void **)&devpath);
+        if (!st && devpath) {
+            /* copy the whole device path */
+            u8 *dp = (u8 *)devpath;
+            while (dp[0] != DP_TYPE_END || dp[1] != DP_SUBTYPE_END) {
+                u16 ln = dp[2] | (dp[3] << 8);
+                if (base_len + ln > 400) break;
+                for (UINTN k = 0; k < ln; k++)
+                    newpath[base_len++] = dp[k];
+                dp += ln;
+            }
+            o = newpath + base_len;
+        } else {
+            for (i = 0; (UINTN)i < prefix; i++) o[i] = ((u8 *)Loaded->FilePath)[i];
+            o = newpath + prefix;
+        }
+    } else {
+        for (i = 0; (UINTN)i < prefix; i++) o[i] = ((u8 *)Loaded->FilePath)[i];
+        o = newpath + prefix;
+    }
+    n = ch16_len(bopts[idx - 1].path);
+    o[0] = DP_TYPE_MEDIA; o[1] = DP_SUBTYPE_FILEPATH;
+    o[2] = (u8)(4 + (n + 1) * 2); o[3] = (u8)((4 + (n + 1) * 2) >> 8);
+    for (i = 0; i <= n; i++) {
+        o[4 + i * 2] = (u8)bopts[idx - 1].path[i];
+        o[4 + i * 2 + 1] = (u8)(bopts[idx - 1].path[i] >> 8);
+    }
+    o += 4 + (n + 1) * 2;
+    o[0] = DP_TYPE_END; o[1] = DP_SUBTYPE_END; o[2] = 4; o[3] = 0;
+    /* TEMP-DBG: dump constructed device path */
+    {
+        u8 *dp = newpath;
+        ser_puts("[blee-boot] devpath: ");
+        while (*dp != DP_TYPE_END || *(dp+1) != DP_SUBTYPE_END) {
+            u8 t = dp[0], st = dp[1];
+            u16 ln = dp[2] | (dp[3] << 8);
+            ser_putc('['); ser_putc('0'+(t>>4)); ser_putc('0'+(t&0xF));
+            ser_putc(':'); ser_putc('0'+(st>>4)); ser_putc('0'+(st&0xF));
+            ser_putc(':'); ser_putn(ln); ser_putc(']');
+            dp += ln;
+        }
+        ser_puts("[END]\n");
+    }
+    puts_ascii("chainloading ");
+    puts_ascii(bopts[idx - 1].label);
+    puts_ascii(" ...\r\n");
+    ser_puts("[blee-boot] chainloading ");
+    ser_puts(bopts[idx - 1].label);
+    ser_puts("\n");
+    st = BS->LoadImage(0, Img, newpath, 0, 0, &child);
+    if (st || !child) {
+        ser_puts("[blee-boot] LoadImage failed: ");
+        put_hex(st);
+        ser_puts("\n");
+        puts_ascii("ERR: LoadImage failed\r\n");
+        BS->Stall(2000000);
+        return;
+    }
+    ser_puts("[blee-boot] loaded, starting\n");
+    st = BS->StartImage(child, 0, 0);
+    ser_puts("[blee-boot] other OS exited\n");
+    puts_ascii("other OS exited (");
+    put_hex(st);
+    puts_ascii("), continuing to BleeOS\r\n");
+}
+
 EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *ST_) {
     EFI_BOOT_SERVICES *BS;
     EFI_LOADED_IMAGE_PROTOCOL *Loaded;
@@ -105,6 +417,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *ST_) {
     BS = ST->BootServices;
     BS->SetWatchdogTimer(0, 0, 0, 0);
     out((const CHAR16 *)L"BleeOS UEFI loader\r\n");
+    ser_puts("[blee-boot] loader start\n");
 
     /* --- filesystem from our own image's device --- */
     st = BS->HandleProtocol(ImageHandle, &LoadedImageGuid,
@@ -115,6 +428,23 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *ST_) {
     if (st) { fail("ERR: no SimpleFileSystem"); return st; }
     st = FS->OpenVolume(FS, &Root);
     if (st) { fail("ERR: OpenVolume"); return st; }
+
+    /* --- other-OS picker: chainload foreign .EFI, else boot BleeOS.
+     * Single-OS ESPs skip the menu entirely. --- */
+    {
+        int n = scan_efi(Loaded, Root);
+        ser_puts("[blee-boot] options: ");
+        ser_putn(n);
+        ser_puts("\n");
+        if (n > 0) {
+            int pick = boot_menu(BS);
+            ser_puts("[blee-boot] pick: ");
+            ser_putn(pick);
+            ser_puts("\n");
+            if (pick > 0 && pick <= nboots)
+                chain_boot(BS, ImageHandle, Loaded, pick);
+        }
+    }
     st = Root->Open(Root, &Kern, (const CHAR16 *)L"\\kernel.bin",
                     EFI_FILE_MODE_READ, 0);
     if (st) { fail("ERR: \\kernel.bin not found"); return st; }
