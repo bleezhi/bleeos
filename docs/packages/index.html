@@ -4,13 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BleeOS packages</title>
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="/style.css">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='0'%3E%3Cstop offset='0' stop-color='%2338e1c6'/%3E%3Cstop offset='.5' stop-color='%2350aaff'/%3E%3Cstop offset='1' stop-color='%237c6bff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='14' fill='%230a0e1a'/%3E%3Ctext x='32' y='44' font-family='monospace' font-size='36' font-weight='bold' text-anchor='middle' fill='url(%23g)'%3EB%3C/text%3E%3C/svg%3E">
 </head>
 <body>
 <header class="site">
-<a class="brand" href="index.html" aria-label="BleeOS home"><h1 class="logo">BleeOS</h1></a>
-<nav><a href="index.html">Home</a><a href="packages.html">Packages</a><a href="https://github.com/bleezhi/bleeos">GitHub</a></nav>
+<a class="brand" href="/" aria-label="BleeOS home"><h1 class="logo">BleeOS</h1></a>
+<nav><a href="/">Home</a><a href="/packages/">Packages</a><a href="https://github.com/bleezhi/bleeos">GitHub</a></nav>
 </header>
 <main>
 <h2><span class="grad">Package index</span></h2>
@@ -43,12 +43,12 @@ files &le; 768 bytes, 32 files max. Format: magic
 </main>
 <footer><span>BleeOS package index.</span><span><a href="https://github.com/bleezhi/bleeos">Source</a></span></footer>
 <script>
-fetch('packages.json').then(r => r.json()).then(ix => {
+fetch('/packages.json').then(r => r.json()).then(ix => {
   const tb = document.querySelector('#pkgs tbody');
   for (const p of ix.packages) {
     const tr = document.createElement('tr');
     const dl = document.createElement('a');
-    dl.href = p.file; dl.textContent = p.file; dl.setAttribute('download', '');
+    dl.href = '/packages/' + p.file; dl.textContent = p.file; dl.setAttribute('download', '');
     for (const v of [p.name, p.version, p.by, p.files, p.size, p.desc]) {
       const td = document.createElement('td');
       td.textContent = v; tr.appendChild(td);
