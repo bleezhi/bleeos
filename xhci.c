@@ -28,6 +28,7 @@
 #include "irq.h"
 #include "drivers.h"
 #include "heap.h"
+#include <stddef.h>
 typedef unsigned long long u64;
 
 /* ---- capability registers (offsets from MMIO base) ---- */
@@ -457,39 +458,59 @@ static int port_reset(int p, int *speed) {
         return -1;
     if (!(v & PORT_PP)) {
         *ps = v | PORT_PP;
-        sleep_ms(10);
+        sleep_ms(100);  /* longer delay for port power to stabilize */
     }
     /* RMW like Linux: PED/PP preserved; a stale PRC clears here and the
      * loop below waits for the fresh one this reset generates. */
     *ps = v | PORT_PR;
-    for (int i = 0; i < 100; i++) {
+    for (int i = 0; i < 500; i++) {  /* longer timeout */
         sleep_ms(1);
         v = *ps;
         if (v & PORT_PRC)
             break;
     }
-    if (!(v & PORT_PRC))
+    if (!(v & PORT_PRC)) {
+        xlogv("port reset PRC timeout", *ps);
         return -1;
+    }
     *ps = v | PORT_PRC;   /* ack reset-change, keep PED/PP */
-    for (int i = 0; i < 100; i++) {
+    for (int i = 0; i < 500; i++) {  /* longer timeout */
         sleep_ms(1);
         v = *ps;
         if (v & PORT_PED)
             break;
     }
-    if (!(v & PORT_PED))
+    if (!(v & PORT_PED)) {
+        xlogv("port reset PED timeout", *ps);
         return -1;
+    }
     if (speed)
         *speed = PORT_SPEED(v);
+    xlogv("port reset ok, speed", *speed);
     return 0;
 }
 
 /* ---- init ---- */
 static int find_xhci(pci_dev_t *out) {
-    /* Renoir/Cezanne/Barcelo USB 3.1 controllers use 1022:1639.
-     * Keep the class-code fallback so other xHCI controllers work too. */
-    if (pci_find(0x1022, 0x1639, out) == 0)
-        return 0;
+    /* AMD xHCI controllers (various generations) */
+    static const u32 amd_xhci_ids[] = {
+        0x10221639,  /* Renoir/Cezanne/Barcelo USB 3.1 */
+        0x10221649,  /* Rembrandt USB4 */
+        0x10221648,  /* Rembrandt USB3 */
+        0x10221650,  /* Mendocino/Barcelo */
+        0x10221636,  /* Picasso/Raven */
+        0x10221638,  /* Raven2 */
+        0x1022164a,  /* Rembrandt USB4 alt */
+        0x1022164b,  /* Rembrandt USB3 alt */
+        0x10221651,  /* Mendocino USB3 */
+    };
+    for (unsigned i = 0; i < sizeof(amd_xhci_ids)/sizeof(amd_xhci_ids[0]); i++) {
+        u16 vid = (u16)(amd_xhci_ids[i] >> 16);
+        u16 did = (u16)amd_xhci_ids[i];
+        if (pci_find(vid, did, out) == 0)
+            return 0;
+    }
+    /* Fallback to class code */
     return pci_find_class(0x0c0330, out);
 }
 int xhci_init(void) {
@@ -502,8 +523,19 @@ int xhci_init(void) {
     if (find_xhci(&d))
         return -1;
     bar = d.bars[0];
-    if (!(bar & 1) && ((bar & 6) == 4) && d.bars[1])
-        return -1;   /* 64-bit BAR above 32-bit address space */
+    if (!(bar & 1) && ((bar & 6) == 4)) {
+        u32 bar1 = d.bars[1];
+        if (bar1 != 0) {
+            /* 64-bit BAR above 4GB - try to use it if in lower 4GB */
+            u64 bar64 = ((u64)bar1 << 32) | (bar & ~0xFu);
+            if (bar64 < 0x100000000ull) {
+                bar = (u32)bar64;
+            } else {
+                xlog("xhci: 64-bit BAR above 4GB, cannot use");
+                return -1;
+            }
+        }
+    }
     bar = pci_bar_addr(&d, 0);
     if (!bar)
         return -1;
