@@ -19,6 +19,46 @@
 <p class="tagline">A tiny 32-bit hobby OS: ASM boot, C kernel, POSIX-ish shell,
 double-buffered GUI desktop, installer, network, and offline packages.</p>
 <p class="cta"><a class="btn" href="#try">Try it</a><a class="btn ghost" href="packages.html">Browse packages</a></p>
+<div class="term" role="img" aria-label="BleeOS shell session: ver prints the version, gui starts the desktop">
+<div class="term-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="term-title">root@bleeos: /</span></div>
+<div class="term-body"><pre id="tty"><noscript>root@bleeos /# ver
+BleeOS 0.3.0 (i386 protected mode)
+root@bleeos /# gui
+Starting GUI...</noscript></pre><span class="caret" aria-hidden="true"></span></div>
+</div>
+<script>
+(function () {
+  var el = document.getElementById('tty');
+  var reduce = window.matchMedia &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var script = [
+    ['in', 'root@bleeos /# ver'],
+    ['out', 'BleeOS 0.3.0 (i386 protected mode)'],
+    ['in', 'root@bleeos /# gui'],
+    ['out', 'Starting GUI...']
+  ];
+  var full = script.map(function (l) { return l[1]; }).join('\n');
+  if (reduce || !el) { if (el) el.textContent = full; return; }
+  var li = 0, ci = 0, out = '';
+  function tick() {
+    if (li >= script.length) {
+      setTimeout(function () { li = 0; ci = 0; out = ''; tick(); }, 4000);
+      return;
+    }
+    var line = script[li][1];
+    if (ci <= line.length) {
+      el.textContent = out + line.slice(0, ci);
+      ci++;
+      setTimeout(tick, script[li][0] === 'in' ? 45 : 12);
+    } else {
+      out += line + '\n';
+      li++; ci = 0;
+      setTimeout(tick, 450);
+    }
+  }
+  tick();
+})();
+</script>
 </section>
 
 <h2><span class="grad">Features</span></h2>
@@ -27,7 +67,7 @@ double-buffered GUI desktop, installer, network, and offline packages.</p>
 <div class="card"><h3>Shell</h3><p>Line editing, history, quoting, <code>$VAR</code>, <code>&amp;&amp;</code> lists, redirection, ramfs with <code>/etc</code>, plus <code>help</code> and <code>man</code> pages.</p></div>
 <div class="card"><h3>GUI desktop</h3><p>Login screen, overlapping windows, taskbar clock. Apps: Terminal, Doom clone, Calculator, ASCII Animator, File Explorer, Display settings.</p></div>
 <div class="card"><h3>Users</h3><p>Salted password DB shared by text and graphical logins; persists across reboots on HDD installs. Default login: <code>root / root</code>.</p></div>
-<div class="card"><h3>Installer</h3><p>Debian-like TUI wizard writes a universal BIOS+UEFI image with verification. Needs a disk &ge; 33&nbsp;MB.</p></div>
+<div class="card"><h3>Installer</h3><p>Debian-like TUI wizard: clear-disk or dual-boot onto a foreign ESP, UEFI/BIOS firmware choice, verification. Needs a disk &ge; 33&nbsp;MB.</p></div>
 <div class="card"><h3>Network</h3><p>E1000 driver with static SLIRP config, ARP cache, and ICMP echo &mdash; <code>ping</code> your gateway.</p></div>
 <div class="card"><h3>USB input</h3><p>USB HID keyboard/mouse over xHCI and UHCI with PS/2 fallback, in both shell and GUI.</p></div>
 <div class="card"><h3>Packages</h3><p>Offline <code>.blee</code> archives installed with <code>pkg</code>; published and CI-verified through this site.</p></div>
