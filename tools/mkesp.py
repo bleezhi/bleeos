@@ -17,7 +17,7 @@ PART_START = 2048              # LBA of the ESP inside the MBR wrapper
 # KERNEL.BIN is padded to the full stage2 size so the ESP carries the
 # exact bytes the installer snapshots from RAM (== hdimg.c KERNEL.BIN).
 # Keep in sync with STAGE2_SECTORS (Makefile/boot.asm/hdimg.h).
-STAGE2_SECTORS = 320
+STAGE2_SECTORS = 384
 SECTORS_PER_CLUSTER = 4        # 2KB clusters
 RESERVED = 8
 FATS = 2

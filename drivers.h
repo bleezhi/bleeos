@@ -6,6 +6,7 @@
 typedef unsigned char  u8;
 typedef unsigned short u16;
 typedef unsigned int   u32;
+typedef unsigned long long u64;
 
 /* ---------- ports ---------- */
 static inline u8 inb(u16 port) {

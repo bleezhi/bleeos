@@ -3,13 +3,16 @@
 #include "users.h"
 #include "shell.h"
 #include "ata.h"
+#include "hdimg.h"   /* STAGE2_SECTORS for UDISK_LBA */
 
 #define UMAX 16   /* max login name length */
 #define PMAX 32   /* max password length (checked, not stored) */
 
 /* on-disk DB: past the OS image (MBR + STAGE2_SECTORS stage2).
- * Keep in sync with STAGE2_SECTORS (Makefile/boot.asm/hdimg.h). */
-#define UDISK_LBA (1 + 320)
+ * Keep in sync with STAGE2_SECTORS (Makefile/boot.asm/hdimg.h).
+ * Moved with the 320 -> 384 stage2 growth: disks installed by
+ * older BleeOS keep their DB at 321 (unread); reinstall to seed. */
+#define UDISK_LBA (1 + STAGE2_SECTORS)
 #define UDISK_NSEC 5   /* header + passwd(2) + shadow(2) */
 static const char UMAGIC[8] = { 'B','L','E','E','U','S','E','R' };
 /* header: magic[8] ver[4] plen[4] slen[4] sum[4] hostname[32]

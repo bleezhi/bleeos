@@ -14,7 +14,7 @@ OVMF ?= /usr/share/edk2-ovmf/x64/OVMF.4m.fd
 DISPLAY_BACKEND ?= $(if $(or $(DISPLAY),$(WAYLAND_DISPLAY)),sdl,none)
 
 # MBR loads this many sectors (must cover the whole stage2 binary)
-STAGE2_SECTORS=320
+STAGE2_SECTORS=384
 
 CFLAGS=-m32 -march=i386 -mno-mmx -mno-sse -mno-sse2 -ffreestanding -nostdlib -nostartfiles -nodefaultlibs \
        -fno-builtin -fno-stack-protector -fno-pie -no-pie \

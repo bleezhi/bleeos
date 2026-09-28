@@ -68,10 +68,12 @@ vanish on reboot when booted from floppy/CD.
 Booting from hard disk (BIOS drive 0x80+, or a valid on-disk DB
 probed at UEFI boot) sets installed mode
 (`installed on HDD: users persist.` at boot) and the DB is kept on
-reserved HDD sectors (LBA 321..325, magic + checksums, past the OS
+reserved HDD sectors (LBA 385..389, magic + checksums, past the OS
 image): loaded into ramfs at boot, written back on every add/del/
 passwd/seed. Verified: useradd alice on HDD, reboot, alice logs in
-with an identical users list. The install drive is detected from
+with an identical users list. NOTE: stage2 grew 320 -&gt; 384 sectors
+after 0.3, moving the DB from LBA 321; disks installed by older
+builds keep users at 321 (unread) — reinstall to re-seed. The install drive is detected from
 the MBR's own boot_drive byte (linear 0x7DA3); the Makefile fails
 the build if that byte moves.
 

@@ -8,7 +8,7 @@
 [BITS 16]
 [ORG 0x7C00]
 
-STAGE2_SECTORS equ 320
+STAGE2_SECTORS equ 384
 STAGE2_LBA     equ 1
 CHUNK_SECTORS  equ 32              ; 16KB per EDD call, segment-contained
 
@@ -70,7 +70,7 @@ start:
     test cx, 1                      ; bit 0 = LBA packet support
     jz use_chs
 
-    ; --- EDD path: 4 chunks of 32 sectors ---
+    ; --- EDD path: STAGE2_SECTORS/32 chunks of 32 sectors ---
     mov byte [lba_hi], 0
     mov word [lba_lo], STAGE2_LBA
     mov cx, STAGE2_SECTORS / CHUNK_SECTORS
