@@ -3,28 +3,46 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>BleeOS</title>
+<meta name="description" content="BleeOS: a tiny 32-bit hobby operating system with a shell, GUI desktop, installer, and offline packages.">
+<title>BleeOS &mdash; a tiny 32-bit hobby OS</title>
 <link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='0'%3E%3Cstop offset='0' stop-color='%2338e1c6'/%3E%3Cstop offset='.5' stop-color='%2350aaff'/%3E%3Cstop offset='1' stop-color='%237c6bff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='14' fill='%230a0e1a'/%3E%3Ctext x='32' y='44' font-family='monospace' font-size='36' font-weight='bold' text-anchor='middle' fill='url(%23g)'%3EB%3C/text%3E%3C/svg%3E">
 </head>
 <body>
-<header>
-<h1>BleeOS</h1>
-<nav><a href="index.html">Home</a><a href="packages.html">Packages</a></nav>
+<header class="site">
+<a class="brand" href="index.html" aria-label="BleeOS home"><h1 class="logo">BleeOS</h1></a>
+<nav><a href="index.html">Home</a><a href="packages.html">Packages</a><a href="https://github.com/bleezhi/bleeos">GitHub</a></nav>
 </header>
 <main>
-<h2>A tiny 32-bit hobby OS</h2>
-<p>BleeOS boots from floppy, hard disk, or CD into a shell, a
-double-buffered GUI with a login screen, and a Debian-like text
-installer. Login accounts, an ATA driver, and a stub USB detector
-included. No network stack yet &mdash; packages travel on disk.</p>
-<h2>Try it</h2>
+<section class="hero">
+<h1 class="logo">BleeOS</h1>
+<p class="tagline">A tiny 32-bit hobby OS: ASM boot, C kernel, POSIX-ish shell,
+double-buffered GUI desktop, installer, network, and offline packages.</p>
+<p class="cta"><a class="btn" href="#try">Try it</a><a class="btn ghost" href="packages.html">Browse packages</a></p>
+</section>
+
+<h2><span class="grad">Features</span></h2>
+<div class="grid">
+<div class="card"><h3>Boot anywhere</h3><p>Floppy, hard disk, and El&nbsp;Torito CD on BIOS; FAT16 ESP with a freestanding <code>BOOTX64.EFI</code> loader on UEFI.</p></div>
+<div class="card"><h3>Shell</h3><p>Line editing, history, quoting, <code>$VAR</code>, <code>&amp;&amp;</code> lists, redirection, ramfs with <code>/etc</code>, plus <code>help</code> and <code>man</code> pages.</p></div>
+<div class="card"><h3>GUI desktop</h3><p>Login screen, overlapping windows, taskbar clock. Apps: Terminal, Doom clone, Calculator, ASCII Animator, File Explorer, Display settings.</p></div>
+<div class="card"><h3>Users</h3><p>Salted password DB shared by text and graphical logins; persists across reboots on HDD installs. Default login: <code>root / root</code>.</p></div>
+<div class="card"><h3>Installer</h3><p>Debian-like TUI wizard writes a universal BIOS+UEFI image with verification. Needs a disk &ge; 33&nbsp;MB.</p></div>
+<div class="card"><h3>Network</h3><p>E1000 driver with static SLIRP config, ARP cache, and ICMP echo &mdash; <code>ping</code> your gateway.</p></div>
+<div class="card"><h3>USB input</h3><p>USB HID keyboard/mouse over xHCI and UHCI with PS/2 fallback, in both shell and GUI.</p></div>
+<div class="card"><h3>Packages</h3><p>Offline <code>.blee</code> archives installed with <code>pkg</code>; published and CI-verified through this site.</p></div>
+</div>
+
+<h2 id="try"><span class="grad">Try it</span></h2>
 <pre>git clone https://github.com/bleezhi/bleeos.git
 cd bleeos
-make run        # floppy + GUI (needs QEMU + KVM)
-make run-cd     # bootable ISO
+make run         # floppy + GUI (needs QEMU + KVM)
+make run-cd      # bootable ISO
+make run-uefi    # UEFI via OVMF
 make run-install # floppy + blank HDD, then `install`
-make iso        # build bleeos.iso</pre>
-<h2>Packages</h2>
+make iso         # build bleeos.iso</pre>
+
+<h2><span class="grad">Packages</span></h2>
 <p>Offline <code>.blee</code> archives (scripts + data) installed with
 the in-OS <code>pkg</code> tool. Browse the <a href="packages.html">package
 index</a>, download a <code>.blee</code>, put it on an attached disk,
@@ -32,9 +50,9 @@ and run:</p>
 <pre>pkg install-hd 2048
 pkg list
 run /pkg/hello/hello.sh</pre>
-<p class="dim">Default login: root / root. Packagers: see
-<code>tools/mkblee.py</code> and <code>packages/</code> in the repo.</p>
+<p class="dim">Packagers: see <code>tools/mkblee.py</code> and
+<code>packages/</code> in the repo.</p>
 </main>
-<footer>BleeOS &mdash; static site, serve <code>docs/</code> with GitHub Pages.</footer>
+<footer><span>BleeOS &mdash; static site, serve <code>docs/</code> with GitHub Pages.</span><span><a href="https://github.com/bleezhi/bleeos">Source</a></span></footer>
 </body>
 </html>
