@@ -26,14 +26,16 @@ static int guid_eq(const u8 *a, const u8 *b) {
         if (a[i] != b[i]) return 0;
     return 1;
 }
-static u32 crc32(const u8 *p, u32 n) {
-    u32 c = 0xFFFFFFFFu;
+static u32 crc_upd(u32 c, const u8 *p, u32 n) {
     for (u32 i = 0; i < n; i++) {
         c ^= p[i];
         for (int k = 0; k < 8; k++)
             c = (c & 1u) ? (c >> 1) ^ 0xEDB88320u : c >> 1;
     }
-    return c ^ 0xFFFFFFFFu;
+    return c;
+}
+static u32 crc32(const u8 *p, u32 n) {
+    return crc_upd(0xFFFFFFFFu, p, n) ^ 0xFFFFFFFFu;
 }
 
 int gpt_is_esp(const u8 type[16]) {
@@ -99,8 +101,10 @@ static void scan_mbr(const u8 *sec, gpt_disk_t *d) {
 
 int gpt_scan(int (*read_sec)(u32, u8 *, void *), void *ctx,
              u32 total_sec, gpt_disk_t *d) {
+    /* one sector buffer: entries stream through it (CRC updated
+     * incrementally, only the first GPT_MAX_LIST kept). 16KB less
+     * .bss than buffering the whole table. */
     static u8 sec[512];
-    static u8 ents[32 * 512];   /* up to 128 x 128B entries */
     u32 hdr_crc, calc, nent, esz, i;
     u64 elba;
     d->scheme = 0;
@@ -138,27 +142,31 @@ int gpt_scan(int (*read_sec)(u32, u8 *, void *), void *ctx,
     if (!nent || esz != 128 || elba + (nent * esz + 511) / 512 > total_sec)
         return -1;
     {
-        u32 nsec = (nent * esz + 511) / 512;
-        u32 got = 0;
-        if (nsec > 32) nsec = 32;
+        u32 total = nent * esz, done = 0, nsec = (total + 511) / 512;
+        u32 want_crc = rd32(sec + 88);   /* sec reused below */
+        u32 running = 0xFFFFFFFFu;
+        if (nsec > 32) return -1;
+        d->scheme = 2;
         for (i = 0; i < nsec; i++) {
-            if (read_sec((u32)elba + i, ents + i * 512, ctx)) return -1;
-            got++;
+            u32 chunk = total - done > 512 ? 512 : total - done;
+            u32 k;
+            if (read_sec((u32)elba + i, sec, ctx)) return -1;
+            running = crc_upd(running, sec, chunk);
+            for (k = 0; k + esz <= chunk; k += esz) {
+                const u8 *e = sec + k;
+                gpt_part_t *p;
+                if (all_zero(e, 16)) continue;
+                if (d->npart >= GPT_MAX_LIST) continue;
+                p = &d->part[d->npart++];
+                for (int j = 0; j < 16; j++) p->type[j] = e[j];
+                p->attrs = rd64(e + 48);
+                p->first = (u32)rd64(e + 32);
+                p->last = (u32)rd64(e + 40);
+                dec_name(p->name, e + 56);
+            }
+            done += chunk;
         }
-        calc = crc32(ents, got * 512 < nent * esz ? got * 512 : nent * esz);
-        if (calc != rd32(sec + 88)) return -1;
-    }
-    d->scheme = 2;
-    for (i = 0; i < nent && d->npart < GPT_MAX_LIST; i++) {
-        const u8 *e = ents + i * esz;
-        gpt_part_t *p;
-        if (all_zero(e, 16)) continue;
-        p = &d->part[d->npart++];
-        for (int k = 0; k < 16; k++) p->type[k] = e[k];
-        p->attrs = rd64(e + 48);
-        p->first = (u32)rd64(e + 32);
-        p->last = (u32)rd64(e + 40);
-        dec_name(p->name, e + 56);
+        if ((running ^ 0xFFFFFFFFu) != want_crc) return -1;
     }
     return 0;
 }

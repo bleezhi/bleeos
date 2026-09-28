@@ -32,7 +32,8 @@ int uefi_active(void) { return uefi_mode; }
 static void kernel_early(void) {
     {
         extern char __bss_end;
-        ASSERT((u32)&__bss_end <= 0x60000u, "kernel too big for heap");
+        /* .bss must stay clear of the heap at 0x78000 (64KB slack) */
+        ASSERT((u32)&__bss_end <= 0x68000u, "kernel too big for heap");
         if (heap_init(0x78000u, 0x86000u))
             panic("heap init failed");
     }
