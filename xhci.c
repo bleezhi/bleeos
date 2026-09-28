@@ -95,12 +95,11 @@ typedef unsigned long long u64;
 #define EP_TYPE_CONTROL (4u << 3)
 #define EP_TYPE_INT_IN (7u << 3)
 
-typedef struct { u32 a, b, c, d; } trb_t;
-
 /* ---- controller state ---- */
 static volatile u8 *mmio;
-static u32 op, db, rt;
-static int ready, maxports, ctx_size = 32;
+static u32 op, rt;
+int ready, maxports, ctx_size = 32;
+u32 db;
 
 /* ---- DMA areas (low .bss, 64-byte aligned) ---- */
 #define CMD_N 16
@@ -117,20 +116,8 @@ __attribute__((aligned(64))) static trb_t kbd_ring[2][EP_N + 1];
 __attribute__((aligned(64))) static trb_t mse_ring[2][EP_N + 1];
 
 /* ---- producer ring cursor ---- */
-typedef struct {
-    trb_t *t;
-    int n, enq, cyc;
-} ring_t;
 static int ev_idx, ev_cyc = 1;
 
-typedef struct {
-    int used, index, port, slot, speed;
-    u8 mps;
-    int kbd_dci, mse_dci;     /* 0 = not configured */
-    u8 kbd_mps, mse_mps;
-    ring_t ep0, kbd, mse;
-    u8 prev[6], mod, caps;
-} xdev_t;
 static xdev_t devs[2];
 static int ndev;
 static int next_usb_addr = 1;   /* USB device addresses: 1, 2, ... */
@@ -141,7 +128,7 @@ static void *sp_pages[8];
 
 /* ---- MMIO + misc helpers ---- */
 static inline u32 rr(u32 o) { return *(volatile u32 *)(mmio + o); }
-static inline void rw(u32 o, u32 v) { *(volatile u32 *)(mmio + o) = v; }
+void rw(u32 o, u32 v) { *(volatile u32 *)(mmio + o) = v; }
 static inline void rw64(u32 o, u64 v) {
     rw(o, (u32)v);
     rw(o + 4, (u32)(v >> 32));
@@ -150,7 +137,7 @@ static void zero(void *p, u32 n) {
     u8 *q = p;
     while (n--) *q++ = 0;
 }
-static u64 phys(const void *p) { return (u64)(u32)p; }
+u64 phys(const void *p) { return (u64)(u32)p; }
 static void hex8(u32 v, char *o) {
     static const char *h = "0123456789ABCDEF";
     for (int i = 0; i < 8; i++) o[i] = h[(v >> (28 - i * 4)) & 15];
@@ -205,7 +192,7 @@ static void ring_reset0(ring_t *r, trb_t *t, int n) {
     ring_reset(r, t, n);
     r->cyc = 1;
 }
-static trb_t *ring_put(ring_t *r, u32 a, u32 b, u32 c, u32 d) {
+trb_t *ring_put(ring_t *r, u32 a, u32 b, u32 c, u32 d) {
     trb_t *t = &r->t[r->enq];
     t->a = a;
     t->b = b;
@@ -218,6 +205,13 @@ static trb_t *ring_put(ring_t *r, u32 a, u32 b, u32 c, u32 d) {
         r->cyc ^= 1;
     }
     return t;
+}
+
+/* accessor functions for msc */
+int xhci_dev_count(void) { return ndev; }
+xdev_t *xhci_dev_get(int index) {
+    if (index < 0 || index >= 2) return 0;
+    return &devs[index];
 }
 
 /* ---- event pump: ALWAYS consumes; returns 1 on wanted event ---- */
@@ -247,6 +241,43 @@ static int ev_next(u32 *type, u32 *slot, u32 *dci, u32 *code) {
         *code = c >> 24;
     return 1;
 }
+
+/* public accessors for msc */
+int xhci_event_poll(void *unused __attribute__((unused)), u32 *type, u32 *slot, u32 *dci, u32 *code) {
+    trb_t *e = &event_ring[ev_idx];
+    if ((e->d & 1u) != (u32)ev_cyc)
+        return 0;
+    u32 d = e->d, c = e->c;
+    ev_idx++;
+    if (ev_idx == EV_N) {
+        ev_idx = 0;
+        ev_cyc ^= 1;
+    }
+    erdp_update();
+    if (type) *type = (d >> 10) & 63u;
+    if (slot) *slot = d >> 24;
+    if (dci) *dci = (d >> 16) & 31u;
+    if (code) *code = c >> 24;
+    return 1;
+}
+
+int xhci_event_wait(int slot, int dci, u32 trb_phys) {
+    for (int i = 0; i < 5000; i++) {
+        u32 type, sl, dc;
+        if (!xhci_event_poll(0, &type, &sl, &dc, 0)) {
+            sleep_ms(1);
+            continue;
+        }
+        if (type != EV_TRANSFER || sl != (u32)slot || dc != (u32)dci)
+            continue;
+        trb_t *e = &event_ring[(ev_idx + EV_N - 1) % EV_N];
+        if ((unsigned int)e->a != trb_phys)
+            continue;
+        return 0;
+    }
+    return -1;
+}
+
 /* wait for a command completion whose TRB pointer matches ours */
 static int cmd_wait(trb_t *t, u32 *slot) {
     u32 want = (u32)phys(t);
@@ -259,7 +290,7 @@ static int cmd_wait(trb_t *t, u32 *slot) {
         if (type != EV_COMMAND)
             continue;   /* port-change etc: consumed, ignored */
         trb_t *e = &event_ring[(ev_idx + EV_N - 1) % EV_N];
-        if (e->a != want)
+        if ((unsigned int)e->a != (unsigned int)want)
             continue;   /* stale completion, keep waiting */
         if (code != COMP_SUCCESS) {
             char b[12];
@@ -294,10 +325,10 @@ static int xfer_poll(u32 slot, u32 dci, u32 want, u32 *code) {
     trb_t *e;
     if (!ev_next(&type, &sl, &dc, &cc))
         return 0;
-    if (type != EV_TRANSFER || sl != slot || dc != dci)
+    if (type != EV_TRANSFER || sl != (u32)slot || dc != (u32)dci)
         return 0;   /* consumed and ignored */
     e = &event_ring[(ev_idx + EV_N - 1) % EV_N];
-    if (e->a != want)
+    if ((unsigned int)e->a != (unsigned int)want)
         return 0;   /* not our TRB (stale); already consumed */
     if (code)
         *code = cc;
@@ -886,14 +917,14 @@ static void hid_pump(void) {
                 continue;
             if (k_queued[i] && !k_done[i] && devs[i].kbd_dci &&
                 sl == (u32)devs[i].slot && dc == (u32)devs[i].kbd_dci &&
-                e->a == k_last[i]) {
+                (unsigned int)e->a == (unsigned int)k_last[i]) {
                 k_done[i] = 1;
                 k_code[i] = cc;
                 break;
             }
             if (m_queued[i] && !m_done[i] && devs[i].mse_dci &&
                 sl == (u32)devs[i].slot && dc == (u32)devs[i].mse_dci &&
-                e->a == m_last[i]) {
+                (unsigned int)e->a == (unsigned int)m_last[i]) {
                 m_done[i] = 1;
                 m_code[i] = cc;
                 break;
