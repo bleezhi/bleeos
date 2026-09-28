@@ -32,8 +32,8 @@ int main(int argc, char **argv) {
     img = fopen(argv[1], "r+b");
     if (!img) { printf("cannot open %s\n", argv[1]); return 1; }
     rc = fat_mount(fsec_r, fsec_w, 0, 0, &v);
-    printf("mount rc=%d fat12=%d nclu=%u free=%d\n", rc, v.fat12,
-           v.nclu, fat_free(&v));
+    printf("mount rc=%d fat12=%d fat32=%d nclu=%u free=%d\n", rc,
+           v.fat12, v.fat32, v.nclu, fat_free(&v));
     if (rc) return 1;
     /* existing files must be found + readable */
     rc = fat_find(&v, 0, "README.TXT", &e);

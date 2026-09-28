@@ -25,7 +25,9 @@ typedef struct {
     u32 root_n;      /* root dir sectors */
     u32 data_sec;    /* first data sector (vol-relative) */
     u32 nclu;        /* data clusters */
-    int fat12;       /* 1 = FAT12, 0 = FAT16 */
+    int fat12;       /* 1 = FAT12, 0 = FAT16/32 */
+    int fat32;       /* 1 = FAT32 (cluster-chain root) */
+    u32 rootclu;     /* FAT32 root dir first cluster */
     u8 scratch[512]; /* bss ok: one sector workspace */
 } fat_vol_t;
 
@@ -37,7 +39,7 @@ typedef struct {
     int is_root;  /* entry lives in the root region */
 } fat_ent_t;
 
-/* 0 ok, -1 corrupt/unreadable, -2 unsupported (FAT32/exFAT/odd) */
+/* 0 ok, -1 corrupt/unreadable, -2 unsupported (exFAT/odd) */
 int fat_mount(fat_rd_t rd, fat_wr_t wr, void *ctx, u32 part_lba,
               fat_vol_t *v);
 /* find name in dir (dir_clu 0 = root for FAT16); 0 ok, -1 missing */
@@ -54,5 +56,11 @@ int fat_read(fat_vol_t *v, u32 dir_clu, const char *name83, u8 *out,
              u32 cap, u32 *out_len);
 /* free clusters remaining (for space checks); -1 on error */
 int fat_free(fat_vol_t *v);
+
+/* list one directory: cb gets "NAME.EXT" (dirs too), attr, size.
+ * Returns entries listed, -1 on error. Skips free/LFN slots. */
+int fat_list(fat_vol_t *v, u32 dir_clu,
+             void (*cb)(const char *name, u8 attr, u32 size, void *ctx),
+             void *ctx);
 
 #endif

@@ -67,7 +67,7 @@ print("esp crafted, old loader 3000 bytes")
 EOF
 cp "$T/esp.img" "$T/esp-before.img"
 ./fat_test "$T/esp.img" 0 | tee fat.out
-grep -q "mount rc=0 fat12=0" fat.out
+grep -q "mount rc=0 fat12=0 fat32=0" fat.out
 grep -q "EFI clu=2" fat.out
 grep -q "BOOT clu=3" fat.out
 grep -q "old loader len=3000" fat.out
@@ -126,3 +126,84 @@ def chain(c):
 print("fat preserve-checks passed, BLEEOS at cluster", ble)
 EOF
 echo "fat self-test: preserve + add + overwrite all OK"
+# ---- image 2: FAT32 data volume with a foreign tree ----
+python3 - "$T" <<'EOF'
+import struct, sys
+T = sys.argv[1]
+SPC, RESVD, NFATS, FATSEC, TOT = 1, 32, 2, 512, 70000
+DATAL = RESVD + NFATS * FATSEC
+img = bytearray(TOT * 512)
+def w16(o, v): struct.pack_into('<H', img, o, v)
+def w32(o, v): struct.pack_into('<I', img, o, v)
+img[0], img[1], img[2] = 0xEB, 0x58, 0x90
+w16(11, 512); img[13] = SPC; w16(14, RESVD); img[16] = NFATS
+w16(17, 0); img[21] = 0xF8; w16(22, 0)
+w16(24, 63); w16(26, 255); w32(32, TOT)
+w32(36, FATSEC); w16(40, 0); w16(42, 0); w32(44, 2); w16(48, 1); w16(50, 6)
+img[510] = 0x55; img[511] = 0xAA
+def fatent(c, v):
+    for f in range(NFATS):
+        w32((RESVD + f * FATSEC) * 512 + c * 4, v)
+fatent(0, 0x0FFFFFF8); fatent(1, 0x0FFFFFFF)
+fatent(2, 0x0FFFFFFF); fatent(3, 0x0FFFFFFF); fatent(4, 0x0FFFFFFF)
+for c in (5, 6, 7, 8, 9):
+    fatent(c, c + 1)
+fatent(10, 0x0FFFFFFF)
+def wdat(cl, off, data):
+    o = (DATAL + (cl - 2) * SPC) * 512 + off
+    img[o:o+len(data)] = data
+def dent(base, name11, attr, cl, size):
+    img[base:base+11] = name11
+    img[base+11] = attr
+    w16(base + 20, (cl >> 16) & 0xFFFF)
+    w16(base + 26, cl & 0xFFFF)
+    w32(base + 28, size)
+wdat(2, 0, b'DOCS       ' + bytes([0x10]) + b'\x00' * 20)
+w16(DATAL * 512 + 26, 3)
+wdat(2, 32, b'NOTES   TXT' + bytes([0x20]) + b'\x00' * 20)
+w16(DATAL * 512 + 32 + 26, 0)
+w32(DATAL * 512 + 32 + 28, 0)
+wdat(3, 0, b'OLD     BIN' + bytes([0x20]) + b'\x00' * 20)
+w16((DATAL + SPC) * 512 + 26, 5)
+w32((DATAL + SPC) * 512 + 28, 3000)
+old = bytes((i * 11 + 5) & 0xFF for i in range(3000))
+for k, cl in enumerate((5, 6, 7, 8, 9, 10)):
+    wdat(cl, 0, old[k*512:(k+1)*512])
+open(T + '/fat32.img', 'wb').write(img)
+open(T + '/old32.bin', 'wb').write(old)
+print("fat32 crafted")
+EOF
+cp "$T/fat32.img" "$T/fat32-before.img"
+./fat_test "$T/fat32.img" 0 | tee fat32.out
+grep -q "mount rc=0 fat12=0 fat32=1" fat32.out
+grep -q "read loader rc=0 len=5000 MATCH" fat32.out
+grep -q "read kernel rc=0 len=15000 MATCH" fat32.out
+grep -q "read overwritten rc=0 len=100 MATCH" fat32.out
+python3 - "$T" <<'EOF'
+import struct, sys
+T = sys.argv[1]
+after = open(T + '/fat32.img','rb').read()
+old = open(T + '/old32.bin','rb').read()
+SPC, RESVD, NFATS, FATSEC = 1, 32, 2, 512
+DATAL = RESVD + NFATS * FATSEC
+def rd16(o): return struct.unpack_from('<H', after, o)[0]
+def clbytes(cl, n):
+    o = (DATAL + (cl - 2) * SPC) * 512
+    return after[o:o+n]
+assert clbytes(5, 3000) == old, "old file clobbered"
+assert after[DATAL*512:DATAL*512+11] == b'DOCS       '
+f0, f1 = RESVD * 512, (RESVD + FATSEC) * 512
+assert after[f0:f0+FATSEC*512] == after[f1:f1+FATSEC*512], "FAT copies differ"
+def chain(c):
+    out = []
+    while True:
+        v = struct.unpack_from('<I', after, f0 + c * 4)[0] & 0x0FFFFFFF
+        out.append(c)
+        if v >= 0x0FFFFFF8: break
+        c = v
+        assert len(out) < 200
+    return out
+assert len(chain(5)) == 6, "old chain wrong: %r" % chain(5)
+print("fat32 preserve-checks passed")
+EOF
+echo "fat32 self-test: preserve + add + overwrite all OK"

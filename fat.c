@@ -37,7 +37,20 @@ static void f_83(u8 *o, const char *s) {
     }
 }
 
-/* read one FAT entry (handles FAT12 packing) */
+/* end-of-chain mark + "is end/bad" tests per FAT width */
+static u32 fat_eoc(const fat_vol_t *v) {
+    return v->fat12 ? 0xFFFu : v->fat32 ? 0x0FFFFFFFu : 0xFFFFu;
+}
+static int fat_end(const fat_vol_t *v, u32 nx) {
+    if (v->fat12) return nx >= 0xFF8u;
+    if (v->fat32) return nx >= 0x0FFFFFF8u;
+    return nx >= 0xFFF8u;
+}
+/* dir_clu 0 means root: FAT12/16 root region, FAT32 root chain */
+static u32 eff_dir(const fat_vol_t *v, u32 d) {
+    return (!d && v->fat32) ? v->rootclu : d;
+}
+/* read one FAT entry (handles FAT12 packing, FAT32 masking) */
 static u32 fat_get(fat_vol_t *v, u32 cl) {
     u32 off, sec, r;
     if (v->fat12) {
@@ -53,6 +66,12 @@ static u32 fat_get(fat_vol_t *v, u32 cl) {
             r |= (u32)v->scratch[off % 512 + 1] << 8;
         }
         return (cl & 1) ? r >> 4 : r & 0xFFFu;
+    }
+    if (v->fat32) {
+        off = cl * 4;
+        sec = v->resvd + off / 512;
+        if (v->rd(v->base + sec, v->scratch, v->ctx)) return 0x0FFFFFFFu;
+        return f_rd32(v->scratch + off % 512) & 0x0FFFFFFFu;
     }
     off = cl * 2;
     sec = v->resvd + off / 512;
@@ -85,6 +104,15 @@ static int fat_set(fat_vol_t *v, u32 cl, u32 val) {
                 s0[o + 1] = (u8)(nw >> 8);
             }
             if (v->wr(v->base + sec, s0, v->ctx)) return -1;
+        } else if (v->fat32) {
+            u32 off = cl * 4, sec = base + off / 512;
+            u8 s0[512];
+            u32 cur, nw;
+            if (v->rd(v->base + sec, s0, v->ctx)) return -1;
+            cur = f_rd32(s0 + off % 512);
+            nw = (cur & 0xF0000000u) | (val & 0x0FFFFFFFu);
+            f_wr32(s0 + off % 512, nw);
+            if (v->wr(v->base + sec, s0, v->ctx)) return -1;
         } else {
             u32 off = cl * 2, sec = base + off / 512;
             u8 s0[512];
@@ -111,7 +139,15 @@ int fat_mount(fat_rd_t rd, fat_wr_t wr, void *ctx, u32 part_lba,
     {
         u16 root_ents = f_rd16(s + 17);
         u32 fatsz = f_rd16(s + 22);
-        if (!fatsz) return -2;   /* FAT32 (or exFAT): refuse */
+        v->fat32 = 0;
+        v->rootclu = 0;
+        if (!fatsz) {
+            fatsz = f_rd32(s + 36);
+            if (!fatsz) return -2;   /* exFAT or odd: refuse */
+            v->fat32 = 1;
+            v->rootclu = f_rd32(s + 44);
+            if (v->rootclu < 2) return -1;
+        }
         v->fatsz = fatsz;
         root_secs = ((u32)root_ents * 32u + 511u) / 512u;
         tot = f_rd16(s + 19);
@@ -123,8 +159,8 @@ int fat_mount(fat_rd_t rd, fat_wr_t wr, void *ctx, u32 part_lba,
         if (v->data_sec >= tot) return -1;
         data = tot - v->data_sec;
         v->nclu = data / v->spc;
-        if (v->nclu >= 65525u) return -2;   /* FAT32: refuse */
-        v->fat12 = v->nclu < 4085u ? 1 : 0;
+        if (!v->fat32 && v->nclu >= 65525u) return -2;
+        v->fat12 = !v->fat32 && v->nclu < 4085u ? 1 : 0;
     }
     return 0;
 }
@@ -137,6 +173,7 @@ int fat_mount(fat_rd_t rd, fat_wr_t wr, void *ctx, u32 part_lba,
 static int dir_scan(fat_vol_t *v, u32 dir_clu,
                     int (*cb)(u32, const u8 *, void *), void *arg) {
     u8 sec[512];
+    dir_clu = eff_dir(v, dir_clu);
     if (!dir_clu) {
         for (u32 s = 0; s < v->root_n; s++) {
             if (v->rd(v->base + v->root_sec + s, sec, v->ctx)) return -1;
@@ -154,14 +191,16 @@ static int dir_scan(fat_vol_t *v, u32 dir_clu,
                 u32 lba = v->base + v->data_sec + (cl - 2) * v->spc + s;
                 if (v->rd(lba, sec, v->ctx)) return -1;
                 for (int e = 0; e < 16; e++) {
-                    int r = cb((u32)e * 32u, sec + e * 32, arg);
+                    int r = cb((hops * v->spc + s) * 512u +
+                               (u32)e * 32u,
+                               sec + e * 32, arg);
                     if (r) return r;
                 }
             }
             hops++;
             {
                 u32 nx = fat_get(v, cl);
-                if (v->fat12 ? nx >= 0xFF8u : nx >= 0xFFF8u) break;
+                if (fat_end(v, nx)) break;
                 if (nx < 2 || nx >= v->nclu + 2) break;
                 cl = nx;
             }
@@ -197,8 +236,8 @@ int fat_find(fat_vol_t *v, u32 dir_clu, const char *name83,
     r = dir_scan(v, dir_clu, find_cb, &f);
     if (r < 0) return -1;
     if (!f.found) return -1;
-    /* root entries: dir_off is volume-root-relative already */
-    e->is_root = dir_clu == 0 ? 1 : 0;
+    /* root-region entries (FAT12/16 root only) */
+    e->is_root = (!v->fat32 && dir_clu == 0) ? 1 : 0;
     return 0;
 }
 
@@ -206,6 +245,7 @@ int fat_find(fat_vol_t *v, u32 dir_clu, const char *name83,
 static int entry_write(fat_vol_t *v, u32 dir_clu, u32 off, const u8 *e) {
     u8 sec[512];
     u32 lba;
+    dir_clu = eff_dir(v, dir_clu);
     if (!dir_clu) {
         lba = v->base + v->root_sec + off / 512;
         if (v->rd(lba, sec, v->ctx)) return -1;
@@ -216,7 +256,7 @@ static int entry_write(fat_vol_t *v, u32 dir_clu, u32 off, const u8 *e) {
         u32 cl = dir_clu, skip = off / 512;
         while (skip >= v->spc) {
             u32 nx = fat_get(v, cl);
-            if (v->fat12 ? nx >= 0xFF8u : nx >= 0xFFF8u) return -1;
+            if (fat_end(v, nx)) return -1;
             if (nx < 2) return -1;
             cl = nx;
             skip -= v->spc;
@@ -232,6 +272,7 @@ static int entry_write(fat_vol_t *v, u32 dir_clu, u32 off, const u8 *e) {
  * Returns 0 with *off set, -1 when full (root) or on error. */
 static int free_slot(fat_vol_t *v, u32 dir_clu, u32 *off) {
     u8 sec[512];
+    dir_clu = eff_dir(v, dir_clu);
     if (!dir_clu) {
         for (u32 s = 0; s < v->root_n; s++) {
             if (v->rd(v->base + v->root_sec + s, sec, v->ctx)) return -1;
@@ -258,7 +299,7 @@ static int free_slot(fat_vol_t *v, u32 dir_clu, u32 *off) {
             }
             {
                 u32 nx = fat_get(v, cl);
-                if (v->fat12 ? nx >= 0xFF8u : nx >= 0xFFF8u) break;
+                if (fat_end(v, nx)) break;
                 if (nx < 2 || nx >= v->nclu + 2) return -1;
                 cl = nx;
                 hops++;
@@ -272,7 +313,7 @@ static int free_slot(fat_vol_t *v, u32 dir_clu, u32 *off) {
                 if (fat_get(v, c) == 0) { nc = c; break; }
             if (!nc) return -1;
             {
-                u32 eoc = v->fat12 ? 0xFFFu : 0xFFFFu;
+                u32 eoc = fat_eoc(v);
                 if (fat_set(v, nc, eoc)) return -1;
                 if (fat_set(v, cl, nc)) return -1;
             }
@@ -290,7 +331,7 @@ static int free_slot(fat_vol_t *v, u32 dir_clu, u32 *off) {
 /* allocate n free clusters, chained; first returned, 0 when none */
 static u32 alloc_chain(fat_vol_t *v, u32 n) {
     u32 first = 0, prev = 0, got = 0;
-    u32 eoc = v->fat12 ? 0xFFFu : 0xFFFFu;
+    u32 eoc = fat_eoc(v);
     for (u32 c = 2; c < v->nclu + 2 && got < n; c++) {
         if (fat_get(v, c) != 0) continue;
         if (fat_set(v, c, eoc)) return 0;
@@ -306,11 +347,24 @@ static void zero_sec(u8 *s) {
     for (int i = 0; i < 512; i++) s[i] = 0;
 }
 
+/* dot names are navigation, never files */
+static int is_dot(const char *s) {
+    return (s[0] == '.' && !s[1]) ||
+        (s[0] == '.' && s[1] == '.' && !s[2]);
+}
+
 int fat_mkdir(fat_vol_t *v, u32 parent_clu, const char *name83,
               u32 *new_clu) {
     fat_ent_t e;
     u8 de[32], sec[512];
     u32 off, nc;
+    if (is_dot(name83)) {   /* "." = parent itself */
+        if (!fat_find(v, parent_clu, name83, &e)) {
+            *new_clu = e.clu;
+            return 0;
+        }
+        return -1;
+    }
     if (!fat_find(v, parent_clu, name83, &e)) {
         if (!(e.attr & 0x10)) return -1;   /* file in the way */
         *new_clu = e.clu;
@@ -325,10 +379,12 @@ int fat_mkdir(fat_vol_t *v, u32 parent_clu, const char *name83,
         if (!s) {
             f_83(de, ".");
             de[11] = 0x10;
-            f_wr16(de + 26, nc & 0xFFFFu);
+            f_wr16(de + 20, (nc >> 16) & 0xFFFFu);
+    f_wr16(de + 26, nc & 0xFFFFu);
             for (int i = 0; i < 32; i++) sec[i] = de[i];
             f_83(de, "..");
             de[11] = 0x10;
+            f_wr16(de + 20, (parent_clu >> 16) & 0xFFFFu);
             f_wr16(de + 26, parent_clu & 0xFFFFu);
             for (int i = 0; i < 32; i++) sec[32 + i] = de[i];
         }
@@ -338,6 +394,7 @@ int fat_mkdir(fat_vol_t *v, u32 parent_clu, const char *name83,
     for (int i = 0; i < 32; i++) de[i] = 0;
     f_83(de, name83);
     de[11] = 0x10;
+    f_wr16(de + 20, (nc >> 16) & 0xFFFFu);
     f_wr16(de + 26, nc & 0xFFFFu);
     if (entry_write(v, parent_clu, off, de)) return -1;
     *new_clu = nc;
@@ -349,14 +406,16 @@ int fat_write(fat_vol_t *v, u32 dir_clu, const char *name83,
     fat_ent_t e;
     u8 de[32], sec[512];
     u32 need, nc, cl, rem, done = 0;
-    int have_old = !fat_find(v, dir_clu, name83, &e);
+    int have_old;
+    if (is_dot(name83)) return -1;   /* never create ./.. files */
+    have_old = !fat_find(v, dir_clu, name83, &e);
     /* free the old chain first (overwrite semantics) */
     if (have_old && !(e.attr & 0x10) && e.clu >= 2) {
         u32 c = e.clu, hops = 0;
         while (c >= 2 && hops < 65536) {
             u32 nx = fat_get(v, c);
             if (fat_set(v, c, 0)) return -1;
-            if (v->fat12 ? nx >= 0xFF8u : nx >= 0xFFF8u) break;
+            if (fat_end(v, nx)) break;
             if (nx < 2) break;
             c = nx;
             hops++;
@@ -380,7 +439,8 @@ int fat_write(fat_vol_t *v, u32 dir_clu, const char *name83,
         }
         if (rem) {
             u32 nx = fat_get(v, cl);
-            if (nx < 2) return -1;
+            if (fat_end(v, nx) || nx < 2 || nx >= v->nclu + 2)
+                return -1;   /* truncated chain */
             cl = nx;
         }
     }
@@ -388,6 +448,7 @@ int fat_write(fat_vol_t *v, u32 dir_clu, const char *name83,
     for (int i = 0; i < 32; i++) de[i] = 0;
     f_83(de, name83);
     de[11] = 0x20;
+    f_wr16(de + 20, (nc >> 16) & 0xFFFFu);
     f_wr16(de + 26, nc & 0xFFFFu);
     f_wr32(de + 28, len);
     if (have_old && !(e.attr & 0x10))
@@ -422,7 +483,8 @@ int fat_read(fat_vol_t *v, u32 dir_clu, const char *name83, u8 *out,
         }
         if (rem) {
             u32 nx = fat_get(v, cl);
-            if (nx < 2) return -1;
+            if (fat_end(v, nx) || nx < 2 || nx >= v->nclu + 2)
+                return -1;   /* truncated chain */
             cl = nx;
         }
         hops++;
@@ -438,4 +500,50 @@ int fat_free(fat_vol_t *v) {
         if (!f) n++;
     }
     return n;
+}
+
+typedef struct {
+    void (*cb)(const char *, u8, u32, void *);
+    void *ctx;
+    int n;
+} list_arg_t;
+
+static int list_cb(u32 off, const u8 *e, void *a) {
+    list_arg_t *l = (list_arg_t *)a;
+    char name[14];
+    int k = 0;
+    (void)off;
+    if (e[0] == 0x00 || e[0] == 0xE5) return 0;
+    if (e[11] == 0x0F) return 0;
+    if (e[0] == '.') {
+        name[k++] = '.';
+        if (e[1] == '.') name[k++] = '.';
+        name[k] = 0;
+    } else {
+        int i, end = 8;
+        while (end > 0 && e[end - 1] == ' ') end--;
+        for (i = 0; i < end && k < 8; i++) name[k++] = (char)e[i];
+        end = 11;
+        while (end > 8 && e[end - 1] == ' ') end--;
+        if (end > 8 && k < 12) {
+            name[k++] = '.';
+            for (i = 8; i < end && k < 12; i++)
+                name[k++] = (char)e[i];
+        }
+        name[k] = 0;
+    }
+    l->cb(name, e[11], f_rd32(e + 28), l->ctx);
+    l->n++;
+    return 0;
+}
+
+int fat_list(fat_vol_t *v, u32 dir_clu,
+             void (*cb)(const char *, u8, u32, void *), void *ctx) {
+    list_arg_t l;
+    int r;
+    l.cb = cb;
+    l.ctx = ctx;
+    l.n = 0;
+    r = dir_scan(v, dir_clu, list_cb, &l);
+    return r < 0 ? -1 : l.n;
 }

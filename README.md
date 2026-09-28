@@ -32,7 +32,7 @@ Boot flow: `boot.asm` (16-bit ASM MBR) → `kernel_entry.asm` (ASM: A20, GDT,
 
 ## Shell commands
 
-`help man echo printf clear uname whoami hostname ver pwd ls cd mkdir touch rm cat env export unset sleep uptime date history true false test exit reboot halt poweroff gui vgaregs curl`
+`help man echo printf clear uname whoami hostname ver pwd ls cd mkdir touch rm cat env export unset sleep uptime date history true false test exit reboot halt poweroff gui vgaregs curl hls hcat hget hput`
 
 `exit` (or Ctrl+D on an empty line) drops back to the boot manager.
 
@@ -69,6 +69,14 @@ grade, not real security). Default login is `root` / `root`.
 `whoami` manage the session. The GUI login uses the same DB.
 ramfs is volatile, except on HDD installs (see below): added users
 vanish on reboot when booted from floppy/CD.
+
+## Persistent files (`hls`, `hcat`, `hget`, `hput`)
+Beyond volatile ramfs: the first FAT12/16/32 data partition on the
+hard disk is mounted on demand (8.3 names, `DIR/FILE` paths) and
+survives reboots — other OSes can read the files too. `hls [DIR]`
+lists, `hcat` prints, `hget`/`hput` move files to/from ramfs
+(768-byte ramfs cap). With no data partition, a FAT ESP serves
+read-only. Verified: write, reboot, read back identical.
 
 ## Users persist when installed
 Booting from hard disk (BIOS drive 0x80+, or a valid on-disk DB

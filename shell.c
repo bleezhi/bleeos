@@ -874,6 +874,10 @@ static int b_net(int argc, char **argv, const char *in);
 static int b_ping(int argc, char **argv, const char *in);
 static int b_curl(int argc, char **argv, const char *in);
 static int b_mem(int argc, char **argv, const char *in);
+static int b_hls(int argc, char **argv, const char *in);
+static int b_hcat(int argc, char **argv, const char *in);
+static int b_hget(int argc, char **argv, const char *in);
+static int b_hput(int argc, char **argv, const char *in);
 static int run_line(char *line);
 static int read_new_pass(char *buf, u32 cap);
 static int b_vgaregs(int argc, char **argv, const char *in);
@@ -978,6 +982,12 @@ static const char MAN_CURL[] =
     "Resolves HOST via DNS (or dotted IP), GETs the path\n"
     "on port 80 and prints the body. Needs -device e1000\n"
     "(try: curl example.com).";
+static const char MAN_HD[] =
+    "hls/hcat/hget/hput - persistent FAT files on disk\n"
+    "Usage: hls [DIR] | hcat FILE | hget FAT RAM | hput RAM FAT\n"
+    "Uses the first FAT12/16/32 data partition (8.3 names,\n"
+    "DIR/FILE paths); files survive reboots and other OSes\n"
+    "can read them. ESP fallback is read-only.";
 static const char MAN_FILER[] =
     "filer - file explorer\nUsage: filer\n"
     "Interactive file explorer with directory navigation.\n"
@@ -1065,6 +1075,10 @@ static const cmd_t cmds[] = {
     {"net", "network status", MAN_NET, b_net},
     {"ping", "ICMP echo", MAN_PING, b_ping},
     {"curl", "fetch a web page", MAN_CURL, b_curl},
+    {"hls", "list FAT files", MAN_HD, b_hls},
+    {"hcat", "print FAT file", MAN_HD, b_hcat},
+    {"hget", "FAT disk to ramfs", MAN_HD, b_hget},
+    {"hput", "ramfs to FAT disk", MAN_HD, b_hput},
     {"filer", "file explorer", MAN_FILER, b_filer},
     {0, 0, 0, 0},
 };
@@ -2119,6 +2133,229 @@ static int b_curl(int argc, char **argv, const char *in) {
         sh_putc(body[i]);
     }
     if (!len || body[len - 1] != '\n') sh_putc('\n');
+    return 0;
+}
+
+/* ---- persistent FAT data partition (survives reboots) ---- */
+static u8 hd_buf[4096];   /* .bss: file transfer workspace */
+
+/* mount first FAT data partition (0 ok); ESP fallback is read-only */
+static int hd_mount(fat_vol_t *v, int *ro_out) {
+    static gpt_disk_t gd;
+    ata_dev_t d;
+    int i, esp_pick = -1;
+    if (ata_info(0, &d)) return -1;
+    if (gpt_scan(inst_rd, 0, d.sectors, &gd)) return -1;
+    for (i = 0; i < gd.npart; i++) {
+        fat_vol_t t;
+        int is_esp = part_is_esp(&gd, i);
+        if (fat_mount(inst_rd, inst_wr, 0, gd.part[i].first, &t))
+            continue;
+        if (!is_esp) {
+            *v = t;
+            *ro_out = 0;
+            return 0;
+        }
+        if (esp_pick < 0) esp_pick = i;
+    }
+    if (esp_pick >= 0 &&
+        !fat_mount(inst_rd, inst_wr, 0, gd.part[esp_pick].first, v)) {
+        *ro_out = 1;
+        return 0;
+    }
+    return -1;
+}
+
+/* split DIR/.. /LEAF (leaf raw, 8.3-ified by fat_*); 0 ok */
+static int hd_resolve(fat_vol_t *v, const char *path, u32 *dir_out,
+                      char *leaf) {
+    u32 dir = 0;
+    int li = 0;
+    while (*path == '/') path++;
+    for (;;) {
+        int ci = 0, i = 0;
+        char comp[13];
+        while (path[i] && path[i] != '/' && ci < 12) comp[ci++] = path[i++];
+        comp[ci] = 0;
+        if (!path[i]) {   /* last: the leaf */
+            while (comp[li] && li < 11) { leaf[li] = comp[li]; li++; }
+            leaf[li] = 0;
+            *dir_out = dir;
+            return 0;
+        }
+        {
+            fat_ent_t e;
+            path += i + 1;
+            while (*path == '/') path++;
+            if (fat_find(v, dir, comp, &e) || !(e.attr & 0x10) ||
+                e.clu < 2)
+                return -1;
+            dir = e.clu;
+        }
+    }
+}
+
+/* resolve a directory path (all components must be dirs); 0 ok */
+static int hd_resolve_dir(fat_vol_t *v, const char *path, u32 *dir_out) {
+    u32 dir = 0;
+    while (*path == '/') path++;
+    if (!*path) { *dir_out = 0; return 0; }
+    for (;;) {
+        int ci = 0, i = 0;
+        char comp[13];
+        fat_ent_t e;
+        while (path[i] && path[i] != '/' && ci < 12) comp[ci++] = path[i++];
+        comp[ci] = 0;
+        if (fat_find(v, dir, comp, &e) || !(e.attr & 0x10) || e.clu < 2)
+            return -1;
+        dir = e.clu;
+        if (!path[i]) { *dir_out = dir; return 0; }
+        path += i + 1;
+        while (*path == '/') path++;
+    }
+}
+
+static void hls_cb(const char *name, u8 attr, u32 size, void *ctx) {
+    char nb[12];
+    (void)ctx;
+    sh_print(name);
+    if (attr & 0x10) sh_putc('/');
+    else {
+        sh_putc(' ');
+        sh_print(sutoa(size, nb, 10, 0));
+    }
+    sh_putc('\n');
+}
+
+static int b_hls(int argc, char **argv, const char *in) {
+    fat_vol_t v;
+    int ro, n;
+    u32 dir = 0;
+    (void)in;
+    if (argc > 2) {
+        sh_eprint("Usage: hls [DIR]\n");
+        return 1;
+    }
+    if (hd_mount(&v, &ro)) {
+        sh_eprint("hls: no FAT partition found\n");
+        return 1;
+    }
+    if (argc == 2) {
+        if (hd_resolve_dir(&v, argv[1], &dir)) {
+            sh_eprint("hls: bad path\n");
+            return 1;
+        }
+    }
+    n = fat_list(&v, dir, hls_cb, 0);
+    if (n < 0) {
+        sh_eprint("hls: list failed\n");
+        return 1;
+    }
+    if (ro) sh_print("(ESP: read-only)\n");
+    return 0;
+}
+
+static int b_hcat(int argc, char **argv, const char *in) {
+    fat_vol_t v;
+    int ro;
+    u32 dir, len = 0;
+    char leaf[12];
+    (void)in;
+    if (argc != 2) {
+        sh_eprint("Usage: hcat FILE\n");
+        return 1;
+    }
+    if (hd_mount(&v, &ro)) {
+        sh_eprint("hcat: no FAT partition found\n");
+        return 1;
+    }
+    (void)ro;
+    if (hd_resolve(&v, argv[1], &dir, leaf) || !leaf[0]) {
+        sh_eprint("hcat: bad path\n");
+        return 1;
+    }
+    if (fat_read(&v, dir, leaf, hd_buf, sizeof(hd_buf), &len)) {
+        sh_eprint("hcat: cannot read (missing? too big?)\n");
+        return 1;
+    }
+    for (u32 i = 0; i < len; i++) sh_putc((char)hd_buf[i]);
+    if (!len || hd_buf[len - 1] != '\n') sh_putc('\n');
+    return 0;
+}
+
+static int b_hget(int argc, char **argv, const char *in) {
+    fat_vol_t v;
+    int ro;
+    u32 dir, len = 0;
+    char leaf[12];
+    (void)in;
+    if (argc != 3) {
+        sh_eprint("Usage: hget FATFILE RAMFILE\n");
+        return 1;
+    }
+    if (hd_mount(&v, &ro)) {
+        sh_eprint("hget: no FAT partition found\n");
+        return 1;
+    }
+    (void)ro;
+    if (hd_resolve(&v, argv[1], &dir, leaf) || !leaf[0]) {
+        sh_eprint("hget: bad path\n");
+        return 1;
+    }
+    if (fat_read(&v, dir, leaf, hd_buf, sizeof(hd_buf), &len)) {
+        sh_eprint("hget: cannot read\n");
+        return 1;
+    }
+    if (len > 768) {
+        sh_eprint("hget: too big for ramfs (768)\n");
+        return 1;
+    }
+    hd_buf[len] = 0;
+    if (shell_fwrite(argv[2], (const char *)hd_buf, len)) {
+        sh_eprint("hget: cannot write ramfs file\n");
+        return 1;
+    }
+    return 0;
+}
+
+static int b_hput(int argc, char **argv, const char *in) {
+    fat_vol_t v;
+    int ro;
+    u32 dir;
+    char leaf[12];
+    char rb[768 + 1];
+    int n;
+    (void)in;
+    if (argc != 3) {
+        sh_eprint("Usage: hput RAMFILE FATFILE\n");
+        return 1;
+    }
+    if (hd_mount(&v, &ro)) {
+        sh_eprint("hput: no FAT partition found\n");
+        return 1;
+    }
+    if (ro) {
+        sh_eprint("hput: ESP is read-only (data partition only)\n");
+        return 1;
+    }
+    if (hd_resolve(&v, argv[2], &dir, leaf) || !leaf[0]) {
+        sh_eprint("hput: bad path\n");
+        return 1;
+    }
+    if ((leaf[0] == '.' && !leaf[1]) ||
+        (leaf[0] == '.' && leaf[1] == '.' && !leaf[2])) {
+        sh_eprint("hput: bad name\n");
+        return 1;
+    }
+    n = shell_fread(argv[1], rb, sizeof(rb));
+    if (n < 0) {
+        sh_eprint("hput: cannot read ramfs file\n");
+        return 1;
+    }
+    if (fat_write(&v, dir, leaf, (u8 *)rb, (u32)n)) {
+        sh_eprint("hput: disk full or write failed\n");
+        return 1;
+    }
     return 0;
 }
 
