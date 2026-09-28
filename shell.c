@@ -941,8 +941,9 @@ static const char MAN_VGAREGS[] =
 static const char MAN_INSTALL[] =
     "install - Debian-like OS installer (TUI)\nUsage: install\n"
     "Stepped wizard (root only): welcome, hostname,\n"
-    "root password, optional user, disk confirm with\n"
-    "firmware (UEFI/BIOS) choice, progress bar.\n"
+    "root password, optional user, then Clear disk\n"
+    "(firmware choice) or Install on a partition\n"
+    "(shares a foreign ESP, keeps other systems).\n"
     "Writes a universal image to the ATA primary master:\n"
     "BIOS MBR + stage2 and a UEFI ESP (BOOTX64.EFI +\n"
     "kernel), so the disk boots on BIOS and UEFI.\n"
@@ -1145,11 +1146,157 @@ static int b_gui(int argc, char **argv, const char *in) {    (void)argc; (void)a
  * sector from embedded blobs + the live stage2 in RAM. No big
  * snapshot buffer: a 16KB .bss chunk streams write+verify. */
 #include "hdimg.h"
+#include "gpt.h"
+#include "fat.h"
 #define INSTALL_CHUNK_SEC 32u
 static u8 inst_chunk[INSTALL_CHUNK_SEC * 512u];
 
 extern u8 _binary_boot_bin_start[];
 extern u8 _binary_boot_bin_end[];
+extern u8 _binary_BOOTX64_EFI_start[];
+extern u8 _binary_BOOTX64_EFI_end[];
+
+/* installer disk I/O on drive 0 for the gpt/fat scanners */
+static int inst_rd(u32 lba, u8 *out, void *ctx) {
+    (void)ctx;
+    return ata_read(0, lba, out, 1);
+}
+static int inst_wr(u32 lba, const u8 *in, void *ctx) {
+    (void)ctx;
+    return ata_write(0, lba, in, 1);
+}
+static int part_is_esp(gpt_disk_t *gd, int i) {
+    if (gd->scheme == 2) return gpt_is_esp(gd->part[i].type);
+    return gd->part[i].type[0] == 0xEF;
+}
+
+/* freeze the live stage2 at the 1MB scratch (see step 6);
+ * 0 ok (snap set + hdimg pointed), else error already shown */
+static int install_snapshot(const u8 **snap_out) {
+    u8 *snap = (u8 *)0x100000u;
+    u32 total = (u32)STAGE2_SECTORS * 512u, a;
+    for (a = 0; a < total; a += 16384u) {
+        volatile u8 *p = snap + a;
+        p[0] = 0xA5; p[1] = 0x5A;
+        if (p[0] != 0xA5 || p[1] != 0x5A) break;
+        p[0] = 0x5A; p[1] = 0xA5;
+        if (p[0] != 0x5A || p[1] != 0xA5) break;
+    }
+    if (a < total) {
+        tui_msg("Error", "scratch RAM unavailable");
+        vga_clear();
+        return -1;
+    }
+    for (u32 i = 0; i < total; i++)
+        snap[i] = ((const u8 *)0x7E00u)[i];
+    hdimg_set_stage2(snap);
+    *snap_out = snap;
+    return 0;
+}
+
+/* dual-boot preserve install: add BleeOS to the ESP at esp_lba
+ * without touching any existing file, then (MBR disks only) lay
+ * our MBR boot code (table intact) + stage2 in LBA 1..389.
+ * GPT disks are UEFI-only: LBA 1..33 hold GPT metadata, so no MBR
+ * boot chain is written there. The old OS keeps booting from the
+ * firmware boot menu. Returns 0 when BleeOS is in place. */
+static int install_preserve(gpt_disk_t *gd, u32 esp_lba) {
+    fat_vol_t v;
+    fat_ent_t probe;
+    u32 ble, k;
+    const u8 *snap;
+    u32 loader_len =
+        (u32)(_binary_BOOTX64_EFI_end - _binary_BOOTX64_EFI_start);
+    u32 kern_len = (u32)STAGE2_SECTORS * 512u;
+    int is_gpt = gd->scheme == 2;
+    tui_progress("Installing", "Checking the ESP...");
+    {
+        int m = fat_mount(inst_rd, inst_wr, 0, esp_lba, &v);
+        if (m == -2) {
+            tui_msg("Blocked", "That ESP is FAT32/exFAT.\n"
+                    "BleeOS writes FAT12/16 only.\n"
+                    "Clear the disk instead.");
+            vga_clear();
+            return -1;
+        }
+        if (m) {
+            tui_msg("Error", "cannot read the ESP");
+            vga_clear();
+            return -1;
+        }
+    }
+    /* the UEFI loader reads \kernel.bin from the ESP root, so the
+     * root must not already have one (never overwrite a foreign
+     * file, even by accident) */
+    if (!fat_find(&v, 0, "KERNEL.BIN", &probe)) {
+        tui_msg("Blocked", "ESP root already has KERNEL.BIN.\n"
+                "Clear the disk instead.");
+        vga_clear();
+        return -1;
+    }
+    {
+        int ff = fat_free(&v);
+        u32 need = (loader_len + kern_len) / ((u32)v.spc * 512u) + 3;
+        if (ff < 0 || (u32)ff < need) {
+            tui_msg("Blocked", "ESP is too full for BleeOS\n"
+                    "(needs ~210KB free).");
+            vga_clear();
+            return -1;
+        }
+    }
+    if (install_snapshot(&snap)) return -1;
+    tui_progress("Installing", "Adding BleeOS to the ESP...");
+    if (fat_mkdir(&v, 0, "EFI", &ble)) goto fail;
+    if (fat_mkdir(&v, ble, "BLEEOS", &ble)) goto fail;
+    tui_progress_update(20);
+    if (fat_write(&v, ble, "BOOTX64.EFI", _binary_BOOTX64_EFI_start,
+                  loader_len))
+        goto fail;
+    tui_progress_update(30);
+    if (fat_write(&v, 0, "KERNEL.BIN", snap, kern_len)) goto fail;
+    tui_progress_update(55);
+    /* read-back verify (buffer past the snapshot) */
+    {
+        u8 *vb = (u8 *)0x130000u;
+        u32 got = 0;
+        if (fat_read(&v, ble, "BOOTX64.EFI", vb, loader_len + 512,
+                     &got) ||
+            got != loader_len)
+            goto fail;
+        for (k = 0; k < loader_len; k++)
+            if (vb[k] != _binary_BOOTX64_EFI_start[k]) goto fail;
+        tui_progress_update(65);
+        if (fat_read(&v, 0, "KERNEL.BIN", vb, kern_len + 512, &got) ||
+            got != kern_len)
+            goto fail;
+        for (k = 0; k < kern_len; k++)
+            if (vb[k] != snap[k]) goto fail;
+        tui_progress_update(75);
+    }
+    if (is_gpt) return 0;   /* UEFI-only: GPT metadata owns LBA 1..33 */
+    /* MBR boot code only: partition table + signature stay */
+    {
+        static u8 sec[512];
+        if (ata_read(0, 0, sec, 1)) goto fail;
+        for (k = 0; k < 446; k++) sec[k] = _binary_boot_bin_start[k];
+        if (ata_write(0, 0, sec, 1)) goto fail;
+    }
+    /* stage2 into the checked-free LBA 1..384 (DB lands at 385 via
+     * users_flush in the shared tail below) */
+    tui_progress("Installing", "Writing system area...");
+    for (u32 s = 0; s < (u32)STAGE2_SECTORS;) {
+        u32 n = (u32)STAGE2_SECTORS - s;
+        if (n > INSTALL_CHUNK_SEC) n = INSTALL_CHUNK_SEC;
+        if (ata_write(0, 1 + s, snap + s * 512u, n)) goto fail;
+        s += n;
+        tui_progress_update(75 + (int)(s * 25 / (u32)STAGE2_SECTORS));
+    }
+    return 0;
+fail:
+    tui_msg("Error", "preserve install failed;\nyour old files are intact.");
+    vga_clear();
+    return -1;
+}
 
 static int b_install(int argc, char **argv, const char *in) {
     (void)argc; (void)argv; (void)in;
@@ -1273,67 +1420,152 @@ static int b_install(int argc, char **argv, const char *in) {
             smemset(nw, 0, sizeof(nw));
         }
     }
-    /* 5. disk confirm + firmware option: UEFI/BIOS buttons pick
-     * how you will boot (the bytes are identical either way) */
-    {
+    /* 5. where + what: wipe the disk, or coexist on its ESP.
+     * Clear path keeps the firmware confirm below; partition path
+     * showers GPT/MBR partitions and preserves a foreign ESP. */
+    int preserved = 0, gpt_only = 0;
+    for (;;) {
         static char body[220], sz[16];
         static const char *btns[] = {
-            "Install (UEFI)", "Install (BIOS)", "Go back"
+            "Clear the selected disk", "Install on a partition",
+            "Go back"
         };
-        int i = 0, r;
+        int i = 0, m;
         const char *t = "Target: ";
         while (*t) body[i++] = *t++;
-        for (int k = 0; d.model[k] && i < 100; k++) body[i++] = d.model[k];
+        for (int k = 0; d.model[k] && i < 80; k++) body[i++] = d.model[k];
         t = " (";
         while (*t) body[i++] = *t++;
         sutoa(d.sectors / 2048, sz, 10, 0);
-        for (int k = 0; sz[k] && i < 120; k++) body[i++] = sz[k];
-        t = " MB)\nDetected: ";
-        while (*t && i < 150) body[i++] = *t++;
-        t = uefi_active() ? "UEFI" : "BIOS (legacy)";
-        while (*t && i < 170) body[i++] = *t++;
-        t = ".\nALL DATA ON IT WILL BE DESTROYED.";
+        for (int k = 0; sz[k] && i < 100; k++) body[i++] = sz[k];
+        t = " MB)\nClear erases everything. Partition\nkeeps other systems (needs its ESP).";
         while (*t && i < 210) body[i++] = *t++;
         body[i] = 0;
-        r = tui_dialog("Target disk", body, btns, 3);
-        if (r == 0) inst_uefi = 1;
-        else if (r == 1) inst_uefi = 0;
-        else {
+        m = tui_dialog("Install where", body, btns, 3);
+        if (m != 0 && m != 1) {
             vga_clear();
             sh_print("Aborted.\n");
             return 1;
         }
+        if (m == 1) {
+            /* partition shower + preserve-ESP flow */
+            static gpt_disk_t gd;
+            static char items[GPT_MAX_LIST + 1][52];
+            static const char *ip[GPT_MAX_LIST + 1];
+            int n, idx;
+            if (gpt_scan(inst_rd, 0, d.sectors, &gd) || !gd.npart) {
+                tui_msg("Partitions", "No partition table found.\n"
+                        "Clear the disk to install.");
+                continue;
+            }
+            for (n = 0; n < gd.npart; n++) {
+                static char sz2[16];
+                u32 secs = gd.part[n].last - gd.part[n].first + 1;
+                u32 mb = secs / 2048;
+                int k2 = 0;
+                const char *tn = gpt_type_name(gd.part[n].type,
+                                              gd.scheme);
+                char *o = items[n];
+                while (*tn && k2 < 18) o[k2++] = *tn++;
+                o[k2++] = ' ';
+                if (mb >= 1024) {
+                    sutoa(mb / 1024, sz2, 10, 0);
+                    for (int q = 0; sz2[q] && k2 < 30; q++)
+                        o[k2++] = sz2[q];
+                    o[k2++] = 'G'; o[k2++] = 'B';
+                } else {
+                    sutoa(mb, sz2, 10, 0);
+                    for (int q = 0; sz2[q] && k2 < 30; q++)
+                        o[k2++] = sz2[q];
+                    o[k2++] = 'M'; o[k2++] = 'B';
+                }
+                if (part_is_esp(&gd, n)) {
+                    const char *e = " (ESP)";
+                    while (*e && k2 < 44) o[k2++] = *e++;
+                } else if (gd.part[n].name[0]) {
+                    o[k2++] = ' ';
+                    for (int q = 0; gd.part[n].name[q] && k2 < 50; q++)
+                        o[k2++] = gd.part[n].name[q];
+                }
+                o[k2] = 0;
+                ip[n] = items[n];
+            }
+            {
+                const char *b = "Go back";
+                int k2 = 0;
+                while (*b) items[n][k2++] = *b++;
+                items[n][k2] = 0;
+                ip[n] = items[n];
+                n++;
+            }
+            idx = tui_menu("Partitions",
+                           "Pick the ESP to share (old files stay):",
+                           ip, n);
+            if (idx < 0 || idx >= gd.npart) continue;
+            if (!part_is_esp(&gd, idx)) {
+                tui_msg("Partitions", "Only the ESP can be shared.\n"
+                        "Pick it, or clear the disk.");
+                continue;
+            }
+            /* our boot chain needs LBA 1..389 free (MBR). On GPT,
+             * metadata owns 1..33 and we write UEFI-only, so only
+             * 34..389 must be free there. */
+            {
+                int bad = 0;
+                u32 lo = gd.scheme == 2 ? 34u : 1u;
+                for (int q = 0; q < gd.npart; q++)
+                    if (gd.part[q].last >= lo &&
+                        gd.part[q].first < 1 + STAGE2_SECTORS + 5)
+                        bad = 1;
+                if (bad) {
+                    tui_msg("Blocked", "A partition covers BleeOS\n"
+                            "system sectors.\n"
+                            "Clear the disk instead.");
+                    continue;
+                }
+            }
+            if (install_preserve(&gd, gd.part[idx].first)) return 1;
+            preserved = 1;
+            gpt_only = gd.scheme == 2 ? 1 : 0;
+            inst_uefi = 1;
+            break;
+        }
+        /* clear path: firmware confirm (bytes identical either way) */
+        {
+            static char cbody[220], csz[16];
+            static const char *cbtns[] = {
+                "Install (UEFI)", "Install (BIOS)", "Go back"
+            };
+            int r, i = 0;
+            const char *t = "Target: ";
+            while (*t) cbody[i++] = *t++;
+            for (int k = 0; d.model[k] && i < 80; k++)
+                cbody[i++] = d.model[k];
+            t = " (";
+            while (*t) cbody[i++] = *t++;
+            sutoa(d.sectors / 2048, csz, 10, 0);
+            for (int k = 0; csz[k] && i < 100; k++)
+                cbody[i++] = csz[k];
+            t = " MB)\nDetected: ";
+            while (*t && i < 150) cbody[i++] = *t++;
+            t = uefi_active() ? "UEFI" : "BIOS (legacy)";
+            while (*t && i < 170) cbody[i++] = *t++;
+            t = ".\nALL DATA ON IT WILL BE DESTROYED.";
+            while (*t && i < 210) cbody[i++] = *t++;
+            cbody[i] = 0;
+            r = tui_dialog("Target disk", cbody, cbtns, 3);
+            if (r == 0) { inst_uefi = 1; break; }
+            if (r == 1) { inst_uefi = 0; break; }
+            continue;   /* Go back / Esc: back to where-choice */
+        }
     }
-    /* 6. write + verify with progress (streamed 32-sector chunks:
-     * universal image boots on BIOS and UEFI alike) */
+    /* 6. clear path: write + verify the universal image.
+     * (preserve path already wrote + verified its own files.) */
+    if (!preserved) {
     tui_progress("Installing", "Writing system...");
     {
-        /* freeze the live stage2: bss/data mutate, so the write and
-         * verify passes must render from a snapshot, not live RAM.
-         * Low RAM is full (.bss ends near 0x59000, heap at 0x78000),
-         * so the snapshot lives at 1MB. Probe it first: without
-         * paging, absent RAM reads back garbage instead of
-         * faulting, and the E820 total is only a sum, so a
-         * write/read pattern test is the honest check. */
-        u8 *snap = (u8 *)0x100000u;
-        {
-            int ok = 1;
-            for (u32 a = 0; a < (u32)STAGE2_SECTORS * 512u; a += 16384u) {
-                volatile u8 *p = snap + a;
-                p[0] = 0xA5; p[1] = 0x5A;
-                if (p[0] != 0xA5 || p[1] != 0x5A) { ok = 0; break; }
-                p[0] = 0x5A; p[1] = 0xA5;
-                if (p[0] != 0x5A || p[1] != 0xA5) { ok = 0; break; }
-            }
-            if (!ok) {
-                tui_msg("Error", "scratch RAM unavailable");
-                vga_clear();
-                return 1;
-            }
-        }
-        for (u32 i = 0; i < (u32)STAGE2_SECTORS * 512u; i++)
-            snap[i] = ((const u8 *)0x7E00u)[i];
-        hdimg_set_stage2(snap);
+        const u8 *snap;
+        if (install_snapshot(&snap)) return 1;
     }
     for (u32 s = 0; s < hdimg_sectors();) {
         u32 n = hdimg_sectors() - s;
@@ -1374,6 +1606,7 @@ static int b_install(int argc, char **argv, const char *in) {
         s += n;
         tui_progress_update(70 + (int)(s * 30 / hdimg_sectors()));
     }
+    }   /* end clear-path write+verify */
     /* persist hostname+users collected above (live media: the
      * session hooks are no-ops, so flush explicitly) */
     if (users_flush()) {
@@ -1385,11 +1618,23 @@ static int b_install(int argc, char **argv, const char *in) {
     /* 7. done */
     {
         static const char *btns[] = { "Reboot now", "Back to shell" };
-        tui_msg("Installation complete",
-                inst_uefi ? "BleeOS is on the disk (BIOS + UEFI bootable).\n"
-                    "Boot it without the install media via UEFI."
-                    : "BleeOS is on the disk (BIOS + UEFI bootable).\n"
-                    "Boot it without the install media via BIOS.");
+        if (preserved && gpt_only)
+            tui_msg("Installation complete",
+                    "BleeOS lives next to your old OS.\n"
+                    "Firmware boot menu: pick\n"
+                    "EFI/BLEEOS/BOOTX64.EFI (UEFI only).");
+        else if (preserved)
+            tui_msg("Installation complete",
+                    "BleeOS lives next to your old OS.\n"
+                    "Firmware boot menu: pick the disk\n"
+                    "(BIOS), or EFI/BLEEOS/BOOTX64.EFI\n"
+                    "on the ESP (UEFI).");
+        else
+            tui_msg("Installation complete",
+                    inst_uefi ? "BleeOS is on the disk (BIOS + UEFI bootable).\n"
+                        "Boot it without the install media via UEFI."
+                        : "BleeOS is on the disk (BIOS + UEFI bootable).\n"
+                        "Boot it without the install media via BIOS.");
         if (tui_dialog("Finished", "Reboot into the new system?",
                        btns, 2) == 0)
             reboot();

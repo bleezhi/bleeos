@@ -47,7 +47,13 @@ plus a UEFI ESP (FAT16 with `BOOTX64.EFI` + kernel, built by
 `tools/test_hdimg.sh`), so the disk boots on BIOS and UEFI alike.
 Works from both BIOS and UEFI boot (payload comes from blobs
 embedded in the kernel plus a frozen RAM snapshot — no source-disk
-detection). Hostname + users are flushed to the user DB after the
+detection). The wizard offers Clear disk (erase + universal image)
+or Install on a partition: the latter showers GPT/MBR partitions
+and shares a foreign FAT12/16 ESP — BleeOS lands in
+`EFI/BLEEOS/BOOTX64.EFI` plus root `KERNEL.BIN` (the UEFI loader
+reads `\kernel.bin` from the ESP root), other loaders untouched;
+on GPT the install is UEFI-only (GPT metadata owns LBA 1..33),
+on MBR our boot code + stage2 go in too (table preserved). Hostname + users are flushed to the user DB after the
 verify. Needs a disk ≥ 67584 sectors (33 MB). Dialogs are modal
 boxes (blue screen, gray box, shadow, red title, red buttons);
 errors use the same style (no-disk offers Reboot). Tested
