@@ -67,6 +67,13 @@ int pci_find(u16 vid, u16 did, pci_dev_t *out) {
             return 0;
         }
     }
+    /* Log failure for debugging */
+    char b[12];
+    serial_print("[pci] find ");
+    serial_print(utoa10(vid, b));
+    serial_print(":");
+    serial_print(utoa10(did, b));
+    serial_print(" failed\n");
     return -1;
 }
 

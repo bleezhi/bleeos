@@ -467,7 +467,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *ST_) {
                 ((u64)info_buf[10] << 16) | ((u64)info_buf[11] << 24) |
                 ((u64)info_buf[12] << 32) | ((u64)info_buf[13] << 40) |
                 ((u64)info_buf[14] << 48) | ((u64)info_buf[15] << 56);
-        if (ksize == 0 || ksize > 0x30000) {   /* stage2 max, see Makefile */
+        /* stage2 max 197120 bytes (385 sectors, see Makefile) */
+        if (ksize == 0 || ksize > 197120u) {
             fail("ERR: bad kernel.bin size");
             return 1;
         }

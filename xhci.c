@@ -537,18 +537,28 @@ int xhci_init(void) {
         }
     }
     bar = pci_bar_addr(&d, 0);
-    if (!bar)
+    if (!bar) {
+        xlog("xhci: BAR is zero");
         return -1;
+    }
+    xlogv("BAR0", d.bars[0]);
+    xlogv("BAR1", d.bars[1]);
+    xlog("xhci: setting PCI cmd");
     pci_set_cmd(&d, 0x06);
+    xlog("xhci: mapping MMIO");
     mmio = (volatile u8 *)(u32)bar;
     cap = mmio[0];
     op = cap;
     xlogv("CAPLENGTH", cap);
-    hcc = *(volatile u32 *)(mmio + XCAP_HCC1);
+    xlogv("op base", op);
+    xlogv("HCCPARAMS", hcc);
     ctx_size = (hcc & (1u << 2)) ? 64 : 32;
     hcs1 = *(volatile u32 *)(mmio + XCAP_HCSP1);
+    xlogv("HCSPARAMS1", hcs1);
     slots = hcs1 & 0xff;
     ports = (hcs1 >> 24) & 0xff;
+    xlogv("slots", slots);
+    xlogv("ports", ports);
     dboff = *(volatile u32 *)(mmio + XCAP_DBOFF);
     rtsoff = *(volatile u32 *)(mmio + XCAP_RTSOFF);
     xlogv("DBOFF", dboff);
