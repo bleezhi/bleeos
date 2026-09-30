@@ -14,6 +14,7 @@
 #include "e1000.h"
 #include "net.h"
 #include "heap.h"
+#include "iso.h"
 #include "fetch.h"
 #include "apps.h"
 
@@ -883,6 +884,8 @@ static int b_curl(int argc, char **argv, const char *in);
 static int b_mem(int argc, char **argv, const char *in);
 static int b_hls(int argc, char **argv, const char *in);
 static int b_hcat(int argc, char **argv, const char *in);
+static int b_ils(int argc, char **argv, const char *in);
+static int b_icat(int argc, char **argv, const char *in);
 static int b_hget(int argc, char **argv, const char *in);
 static int b_hput(int argc, char **argv, const char *in);
 static int run_line(char *line);
@@ -995,6 +998,13 @@ static const char MAN_HD[] =
     "Uses the first FAT12/16/32 data partition (8.3 names,\n"
     "DIR/FILE paths); files survive reboots and other OSes\n"
     "can read them. ESP fallback is read-only.";
+static const char MAN_ISO[] =
+    "ils/icat - browse the CD-ROM (ISO9660)\n"
+    "Usage: ils [DIR] | icat FILE\n"
+    "Lists and prints files from the ATAPI CD (8.3 uppercase\n"
+    "names, DIR/FILE paths; long names truncate, e.g.\n"
+    "hello.blee lives as HELLO.BLE). pkg install-cd FILE\n"
+    "installs a .blee archive straight from the disc.\n";
 static const char MAN_FILER[] =
     "filer - file explorer\nUsage: filer\n"
     "Interactive file explorer with directory navigation.\n"
@@ -1014,10 +1024,11 @@ static const char MAN_RCINIT[] =
 static const char MAN_PKG[] =
     "pkg - offline package manager\n"
     "Usage: pkg list | info NAME | install FILE |\n"
-    "       pkg install-hd LBA | remove NAME\n"
+    "       pkg install-hd LBA | install-cd FILE | remove NAME\n"
     ".blee archives install scripts+data into /pkg/<name>/\n"
     "(registry in /pkg/registry). No network: archives come\n"
-    "from ramfs files or raw disk sectors (see the website).\n"
+    "from ramfs files, raw disk sectors, or the CD (install-cd\n"
+    "reads from ISO9660 paths, e.g. /HELLO.BLEE).\n"
     "Run installed scripts with `run /pkg/<name>/...`.\n";
 static const char MAN_MEM[] =
     "mem - heap statistics\nUsage: mem\n"
@@ -1094,6 +1105,8 @@ static const cmd_t cmds[] = {
     {"hcat", "print FAT file", MAN_HD, b_hcat},
     {"hget", "FAT disk to ramfs", MAN_HD, b_hget},
     {"hput", "ramfs to FAT disk", MAN_HD, b_hput},
+    {"ils", "list CD files", MAN_ISO, b_ils},
+    {"icat", "print CD file", MAN_ISO, b_icat},
     {"filer", "file explorer", MAN_FILER, b_filer},
     {0, 0, 0, 0},
 };
@@ -1961,7 +1974,7 @@ static int b_pkg(int argc, char **argv, const char *in) {
     (void)in;
     if (argc < 2) {
         sh_eprint("Usage: pkg list | info NAME | install FILE |"
-                  " install-hd LBA | remove NAME\n");
+                  " install-hd LBA | install-cd FILE | remove NAME\n");
         return 1;
     }
     if (scmp(argv[1], "list") == 0) {
@@ -2020,15 +2033,28 @@ static int b_pkg(int argc, char **argv, const char *in) {
         sh_print("Removed\n");
         return 0;
     }
-    if (scmp(argv[1], "install") == 0 || scmp(argv[1], "install-hd") == 0) {
+    if (scmp(argv[1], "install") == 0 || scmp(argv[1], "install-hd") == 0 ||
+        scmp(argv[1], "install-cd") == 0) {
         char name[40], ver[40];
         int n, nf, fromhd = scmp(argv[1], "install-hd") == 0;
+        int fromcd = scmp(argv[1], "install-cd") == 0;
         u8 *arc = PKG_ARC;
         if (argc != 3) {
-            sh_eprint("Usage: pkg install FILE | install-hd LBA\n");
+            sh_eprint("Usage: pkg install FILE | install-hd LBA | install-cd FILE\n");
             return 1;
         }
-        if (fromhd) {
+        if (fromcd) {
+            u32 len = 0;
+            if (iso_read(argv[2], arc, PKG_MAX_BYTES, &len)) {
+                sh_eprint("pkg: cannot read file from CD\n");
+                return 1;
+            }
+            if (pkg_check(arc, len)) {
+                sh_eprint("pkg: bad archive (magic/size/checksum)\n");
+                return 1;
+            }
+            n = (int)len;
+        } else if (fromhd) {
             u32 lba = 0, secs;
             int len;
             for (int i = 0; argv[2][i]; i++) {
@@ -2265,7 +2291,7 @@ static int b_curl(int argc, char **argv, const char *in) {
 }
 
 /* ---- persistent FAT data partition (survives reboots) ---- */
-static u8 hd_buf[4096];   /* .bss: file transfer workspace */
+static u8 hd_buf[2048];   /* .bss: file transfer workspace (shared) */
 
 /* mount first FAT data partition (0 ok); ESP fallback is read-only */
 static int hd_mount(fat_vol_t *v, int *ro_out) {
@@ -2484,6 +2510,51 @@ static int b_hput(int argc, char **argv, const char *in) {
         sh_eprint("hput: disk full or write failed\n");
         return 1;
     }
+    return 0;
+}
+
+static void ils_cb(const char *name, int is_dir, u32 size, void *ctx) {
+    char nb[12];
+    (void)ctx;
+    sh_print(name);
+    if (is_dir) sh_putc('/');
+    else {
+        sh_putc(' ');
+        sh_print(sutoa(size, nb, 10, 0));
+    }
+    sh_putc('\n');
+}
+
+static int b_ils(int argc, char **argv, const char *in) {
+    const char *path = argc > 1 ? argv[1] : "";
+    int n;
+    (void)in;
+    if (argc > 2) {
+        sh_eprint("Usage: ils [DIR]\n");
+        return 1;
+    }
+    n = iso_list(path, ils_cb, 0);
+    if (n < 0) {
+        sh_eprint("ils: no CD found or bad path\n");
+        return 1;
+    }
+    return 0;
+}
+
+static int b_icat(int argc, char **argv, const char *in) {
+    u32 len = 0;
+    (void)in;
+    if (argc != 2) {
+        sh_eprint("Usage: icat FILE\n");
+        return 1;
+    }
+    /* hd_buf shared with hcat (never concurrent); 2KB text window */
+    if (iso_read(argv[1], hd_buf, 2048, &len)) {
+        sh_eprint("icat: cannot read (missing? too big?)\n");
+        return 1;
+    }
+    for (u32 i = 0; i < len; i++) sh_putc((char)hd_buf[i]);
+    if (!len || hd_buf[len - 1] != '\n') sh_putc('\n');
     return 0;
 }
 

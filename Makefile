@@ -20,7 +20,7 @@ CFLAGS=-m32 -march=i386 -mno-mmx -mno-sse -mno-sse2 -ffreestanding -nostdlib -no
        -fno-builtin -fno-stack-protector -fno-pie -no-pie \
        -Wall -Wextra -O2 -std=gnu11
 
-OBJS=kernel_entry.o drivers.o bootmenu.o shell.o kernel.o vbe.o gfx.o mouse.o wm.o apps.o login.o ata.o users.o uhci.o xhci.o xhci_msc.o usb.o tui.o pkg.o doom.o e1000.o net.o tcp.o vt.o term.o irq.o irq_c.o heap.o pci.o amd_display.o fbcon.o hdimg.o fetch.o gpt.o fat.o ext2.o
+OBJS=kernel_entry.o drivers.o bootmenu.o shell.o kernel.o vbe.o gfx.o mouse.o wm.o apps.o login.o ata.o users.o uhci.o xhci.o xhci_msc.o usb.o tui.o pkg.o doom.o e1000.o net.o tcp.o vt.o term.o irq.o irq_c.o heap.o pci.o amd_display.o fbcon.o hdimg.o fetch.o gpt.o fat.o ext2.o iso.o
 # install blobs: boot.bin (MBR for HD targets) + BOOTX64.EFI (ESP for HD
 # targets), embedded as binary objects for the installer backend
 BOOTBINDS=bootbind.o loaderbind.o
@@ -121,6 +121,9 @@ gpt.o: gpt.c gpt.h drivers.h
 
 fat.o: fat.c fat.h drivers.h
 	$(CC) $(CFLAGS) -c fat.c -o fat.o
+
+iso.o: iso.c iso.h ata.h drivers.h
+	$(CC) $(CFLAGS) -c iso.c -o iso.o
 
 ext2.o: ext2.c ext2.h drivers.h
 	$(CC) $(CFLAGS) -c ext2.c -o ext2.o
@@ -225,6 +228,8 @@ iso: os.img esp.img
 	cp os.img iso_root/boot.img
 	cp esp.img iso_root/efiboot.img
 	cp README.md iso_root/README.TXT
+	mkdir -p iso_root/PKGS
+	cp packages/*.blee iso_root/PKGS/ 2>/dev/null || true
 	xorrisofs -o bleeos.iso -V BLEEOS \
 		-b boot.img -c boot.cat \
 		-eltorito-alt-boot -e efiboot.img -no-emul-boot \

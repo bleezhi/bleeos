@@ -32,7 +32,7 @@ Boot flow: `boot.asm` (16-bit ASM MBR) → `kernel_entry.asm` (ASM: A20, GDT,
 
 ## Shell commands
 
-`help man echo printf clear uname whoami hostname ver pwd ls cd mkdir touch rm cat env export unset sleep uptime date history true false test exit reboot halt poweroff gui vgaregs curl hls hcat hget hput rcinit`
+`help man echo printf clear uname whoami hostname ver pwd ls cd mkdir touch rm cat env export unset sleep uptime date history true false test exit reboot halt poweroff gui vgaregs curl hls hcat hget hput rcinit ils icat`
 
 `exit` (or Ctrl+D on an empty line) drops back to the boot manager.
 
@@ -141,6 +141,10 @@ hardware would otherwise `hlt` forever).
 guest changes are needed and users stay volatile. Tested with
 `run-cd` (`-boot order=d`): boots to the login prompt, root shell
 works.
+The ISO also carries data: `make iso` copies `packages/*.blee`
+into `/PKGS/` on the disc (ISO grows, `kernel.bin` doesn't). The
+guest reads them via ATAPI + ISO9660 (`ils`, `icat`,
+`pkg install-cd /PKGS/HELLO.BLEE`).
 
 ## UEFI (`make esp.img`, `make run-uefi`)
 `BOOTX64.EFI` (freestanding x86_64, no gnu-efi — minimal EFI headers
