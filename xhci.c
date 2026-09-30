@@ -861,23 +861,19 @@ int xhci_enumerate_port(int p, int index) {
         /* EP contexts mirror SeaBIOS's proven-good encoding: plain
          * interval/type/MPS/ring/avg, no CErr or ESIT extras (either
          * of those draws code 5 from QEMU here).  Ring pointer LSB
-         * (DCS) must be 1 because our producer cycles start at 1. */
+         * (DCS) must be 1 because our producer cycles start at 1.
+         * Input-context index is DCI+1 (entry 0 is the control
+         * context): EP1 IN (DCI 3) goes to entry 4, NOT entry 3.
+         * Writing entry 3 made QEMU enable the EP with a zero
+         * dequeue, so kicks silently found no work (no fetch). */
         if (kep)
-            ctx_wr(kep * 2 + 1, (u32)fs_interval(10) << 16,
+            ctx_wr(kep * 2 + 2, (u32)fs_interval(10) << 16,
                    EP_TYPE_INT_IN | ((u32)kmps << 16),
                    phys(x->kbd.t) | 1u, 8);
         if (mep)
-            ctx_wr(mep * 2 + 1, (u32)fs_interval(10) << 16,
+            ctx_wr(mep * 2 + 2, (u32)fs_interval(10) << 16,
                    EP_TYPE_INT_IN | ((u32)mmps << 16),
                    phys(x->mse.t) | 1u, 8);
-        /* TEMPORARY: dump EP3 input dwords (guest-side truth) */
-        if (kep) {
-            u32 *epc = ictx(kep * 2 + 1);
-            xlogv("ep3.d0", epc[0]);
-            xlogv("ep3.d1", epc[1]);
-            xlogv("ep3.d2", epc[2]);
-            xlogv("ep3.d4", epc[4]);
-        }
         rc = command((u32)phys(in_ctx), (u32)(phys(in_ctx) >> 32), 0,
                      TRB_C_CONFIG_EP | ((u32)slot << 24), 0);
         if (rc) {
@@ -900,11 +896,15 @@ int xhci_enumerate_port(int p, int index) {
         xlog("endpoints configured");
     }
     /* write full output EP contexts ourselves; the fields QEMU maintains
-     * (state, dequeue) are written with matching values. */
+     * (state, dequeue) are written with matching values. Index is the
+     * DCI (kep*2+1), NOT 1+kep: the device context holds one entry per
+     * DCI (0 = slot), and EP1 IN lives at index 3. The 1+kep form
+     * clobbers EP1 OUT's slot and leaves EP1 IN unprogrammed, so the
+     * controller ignores its doorbells (no fetch, wedged input). */
     {
         u8 *base = out_ctx[x->index];
         if (kep) {
-            u32 *p = (u32 *)(base + (1 + (u32)kep) * (u32)ctx_size);
+            u32 *p = (u32 *)(base + ((u32)kep * 2u + 1u) * (u32)ctx_size);
             p[0] = ((u32)fs_interval(10) << 16) | 1u;
             p[1] = EP_TYPE_INT_IN | ((u32)kmps << 16);
             p[2] = (u32)phys(x->kbd.t) | 1u;
@@ -912,7 +912,7 @@ int xhci_enumerate_port(int p, int index) {
             p[4] = kmps;
         }
         if (mep) {
-            u32 *p = (u32 *)(base + (1 + (u32)mep) * (u32)ctx_size);
+            u32 *p = (u32 *)(base + ((u32)mep * 2u + 1u) * (u32)ctx_size);
             p[0] = ((u32)fs_interval(10) << 16) | 1u;
             p[1] = EP_TYPE_INT_IN | ((u32)mmps << 16);
             p[2] = (u32)phys(x->mse.t) | 1u;
