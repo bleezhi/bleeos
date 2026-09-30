@@ -451,43 +451,67 @@ static int fs_interval(u8 binterval) {
     return n;
 }
 /* ---- port reset ---- */
-static int port_reset(int p, int *speed) {
+/* PORTSC change bits (RWC: writing 1 clears). Cleared before reset
+ * so a stale PRC can't fake success, per xHCI 4.19.2. */
+#define PORT_CSC (1u << 17)
+#define PORT_PEC (1u << 18)
+#define PORT_OCC (1u << 19)
+#define PORT_WRC (1u << 20)
+static int port_reset_once(int p, int *speed) {
     volatile u32 *ps = (volatile u32 *)(mmio + op + XOP_PORTS + p * 0x10);
     u32 v = *ps;
     if (!(v & PORT_CCS))
         return -1;
+    if (v & PORT_PED)
+        goto done;   /* firmware left it enabled: trust it */
     if (!(v & PORT_PP)) {
         *ps = v | PORT_PP;
-        sleep_ms(100);  /* longer delay for port power to stabilize */
+        sleep_ms(100);   /* power stabilization */
+        v = *ps;
     }
-    /* RMW like Linux: PED/PP preserved; a stale PRC clears here and the
-     * loop below waits for the fresh one this reset generates. */
+    /* clear stale change bits, then reset (RMW preserves PED/PP) */
+    *ps = v | PORT_CSC | PORT_PEC | PORT_OCC | PORT_WRC | PORT_PRC;
+    v = *ps;
+    xlogv("port pre-reset", v);
     *ps = v | PORT_PR;
-    for (int i = 0; i < 500; i++) {  /* longer timeout */
+    xlogv("port PR set", *ps);
+    for (int i = 0; i < 500; i++) {
         sleep_ms(1);
         v = *ps;
         if (v & PORT_PRC)
             break;
     }
-    if (!(v & PORT_PRC)) {
-        xlogv("port reset PRC timeout", *ps);
+    xlogv("port PRC wait end", v);
+    if (!(v & PORT_PRC))
         return -1;
-    }
     *ps = v | PORT_PRC;   /* ack reset-change, keep PED/PP */
-    for (int i = 0; i < 500; i++) {  /* longer timeout */
+    for (int i = 0; i < 500; i++) {
         sleep_ms(1);
         v = *ps;
         if (v & PORT_PED)
             break;
     }
     if (!(v & PORT_PED)) {
-        xlogv("port reset PED timeout", *ps);
+        xlogv("port PED timeout", v);
         return -1;
     }
+done:
+    v = *ps;
     if (speed)
         *speed = PORT_SPEED(v);
     xlogv("port reset ok, speed", *speed);
     return 0;
+}
+static int port_reset(int p, int *speed) {
+    /* real silicon sometimes needs a second try (PHY/link training
+     * races the first reset); cheap at boot, so retry. */
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if (port_reset_once(p, speed) == 0)
+            return 0;
+        sleep_ms(100);
+    }
+    xlogv("port reset failed", (u32)p);
+    return -1;
 }
 
 /* ---- init ---- */
@@ -551,6 +575,7 @@ int xhci_init(void) {
     op = cap;
     xlogv("CAPLENGTH", cap);
     xlogv("op base", op);
+    hcc = *(volatile u32 *)(mmio + XCAP_HCC1);
     xlogv("HCCPARAMS", hcc);
     ctx_size = (hcc & (1u << 2)) ? 64 : 32;
     hcs1 = *(volatile u32 *)(mmio + XCAP_HCSP1);
@@ -581,25 +606,33 @@ int xhci_init(void) {
     rt = rtsoff;
     if ((*(volatile u32 *)(mmio + op + XOP_PAGESZ) & 1) == 0)
         return -1;
-    /* Hand ownership to the OS when the legacy BIOS capability exists. */
+    /* Hand ownership to the OS when the legacy BIOS capability exists.
+     * Enforced with a real timeout: if BIOS/SMM never releases, port
+     * resets below will race firmware, so report it on screen. */
     {
         u32 ext = (hcc >> 16) * 4;
+        int owned = 1;   /* assume no BIOS owner unless proven otherwise */
         while (ext) {
             u32 v = *(volatile u32 *)(mmio + ext);
             u8 id = v & 0xff, next = (v >> 8) & 0xff;
             if (id == 1) {
+                int t;
+                owned = 0;
                 *(volatile u32 *)(mmio + ext) = v | (1u << 24);
-                for (int i = 0; i < 100000; i++) {
+                for (t = 0; t < 100; t++) {
                     v = *(volatile u32 *)(mmio + ext);
-                    if (!(v & (1u << 16)))
-                        break;
+                    if (!(v & (1u << 16))) { owned = 1; break; }
+                    sleep_ms(10);
                 }
+                xlogv("handoff BIOS-owned after 1s", (v >> 16) & 1u);
                 break;
             }
             if (!next)
                 break;
             ext += next * 4;
         }
+        if (!owned)
+            xlog("WARN: BIOS kept xHCI ownership; ports may fight SMM");
     }
     if (hce_check("handoff"))
         return -1;
@@ -672,15 +705,6 @@ int xhci_init(void) {
         }
     }
     xlog("controller running, cmd path OK");
-    /* TEMPORARY EXPERIMENT (revert after test): consume slots 1-2 so
-     * real devices enumerate on fresh slots 3+. Tests whether QEMU
-     * keeps stale per-slot EP state across HCRST. */
-    {
-        u32 dummy;
-        command(0, 0, 0, TRB_C_ENABLE_SLOT, &dummy);
-        command(0, 0, 0, TRB_C_ENABLE_SLOT, &dummy);
-        xlogv("burned slots, last", dummy);
-    }
     ready = 1;
     return 0;
 }
