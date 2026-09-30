@@ -285,6 +285,12 @@ static void fs_init(void) {
     fs_write_str("/motd", "Welcome to BleeOS 0.3 - tiny POSIX-ish shell.\nType `help`.\n");
     fs_write_str("/version", "BleeOS 0.3.0 (i386 protected mode)\n");
     if (etc >= 0) fs_write_str("/etc/hostname", "bleeos");
+    fs_write_str("/etc/rc.boot",
+        "# BleeOS boot script: runs once before first login.\n"
+        "# Shell commands below; # comments and blanks skipped.\n"
+        "# A failing line is reported, never aborts the boot.\n"
+        "echo BleeOS init: rc.boot ok\n");
+    if (etc >= 0) fs_alloc((u8)etc, "services", 1);
     scpy(cwd, "/");
 }
 
@@ -869,6 +875,7 @@ static int b_userdel(int argc, char **argv, const char *in);
 static int b_users(int argc, char **argv, const char *in);
 static int b_usb(int argc, char **argv, const char *in);
 static int b_run(int argc, char **argv, const char *in);
+static int b_rcinit(int argc, char **argv, const char *in);
 static int b_pkg(int argc, char **argv, const char *in);
 static int b_net(int argc, char **argv, const char *in);
 static int b_ping(int argc, char **argv, const char *in);
@@ -997,6 +1004,13 @@ static const char MAN_RUN[] =
     "run - execute a script file\nUsage: run FILE\n"
     "Runs each line as a shell command (skips blanks and\n"
     "# comments). Stops early on exit/logout.\n";
+static const char MAN_RCINIT[] =
+    "rcinit - boot scripts and on-demand services\n"
+    "Usage: rcinit list | start NAME | boot\n"
+    "/etc/rc.boot runs once before the first login; every\n"
+    "file in /etc/services/ autostarts at boot too. start\n"
+    "runs one now, boot reruns all, list names them. A\n"
+    "failing line is reported, never aborts the boot.\n";
 static const char MAN_PKG[] =
     "pkg - offline package manager\n"
     "Usage: pkg list | info NAME | install FILE |\n"
@@ -1070,6 +1084,7 @@ static const cmd_t cmds[] = {
     {"users", "list users", MAN_USERS, b_users},
     {"usb", "USB devices", MAN_USB, b_usb},
     {"run", "run script file", MAN_RUN, b_run},
+    {"rcinit", "boot scripts and services", MAN_RCINIT, b_rcinit},
     {"pkg", "package manager", MAN_PKG, b_pkg},
     {"mem", "heap stats", MAN_MEM, b_mem},
     {"net", "network status", MAN_NET, b_net},
@@ -1825,6 +1840,119 @@ static int b_run(int argc, char **argv, const char *in) {
     return last_status;
 }
 
+/* ================= init: rc.boot + services =================
+ * No processes exist, so services are declarative scripts, not
+ * daemons: /etc/rc.boot runs once before the first login, then
+ * every file in /etc/services/ runs (also via `service boot`).
+ * A failing line is reported and skipped; the boot never aborts.
+ * exit/logout inside scripts are shielded from the session. */
+
+/* run one script file; returns last nonzero status (0 = all ok,
+ * -1 = unreadable). Reports each failure as TAG: path: line N. */
+static int init_run_file(const char *path, const char *tag) {
+    char buf[768];
+    int n = shell_fread(path, buf, sizeof(buf));
+    int o = 0, lineno = 0, worst = 0;
+    int se = exit_flag, sl = logout_flag;
+    static char line[256];
+    if (n < 0) return -1;
+    while (o < n) {
+        int k = 0, ls = o;
+        char nb[12];
+        while (o < n && buf[o] != '\n') o++;
+        while (ls < o && (buf[ls] == ' ' || buf[ls] == '\t')) ls++;
+        while (ls < o && k < 255) line[k++] = buf[ls++];
+        line[k] = 0;
+        if (o < n) o++;
+        if (!line[0] || line[0] == '#') continue;
+        lineno++;
+        int st = run_line(line);
+        exit_flag = 0; logout_flag = 0;   /* shield the session */
+        if (st != 0) {
+            sh_print(tag); sh_print(": ");
+            sh_print(path); sh_print(": line ");
+            sh_print(utoa10((u32)lineno, nb));
+            sh_print(" failed\n");
+            worst = st;
+        }
+    }
+    exit_flag = se; logout_flag = sl;
+    return worst;
+}
+
+/* run every file in /etc/services; 0 ok, else last failure */
+static int init_run_services(void) {
+    int idx = fs_resolve("/etc/services");
+    int worst = 0;
+    if (idx < 0 || !fs[idx].is_dir) return 0;   /* none configured */
+    for (int i = 0; i < FS_MAX; i++) {
+        static char path[64];
+        int p = 0;
+        const char *t;
+        if (!fs[i].used || fs[i].parent != idx || fs[i].is_dir ||
+            i == idx)
+            continue;
+        t = "/etc/services/";
+        while (*t) path[p++] = *t++;
+        for (int k = 0; fs[i].name[k] && p < 60; k++)
+            path[p++] = fs[i].name[k];
+        path[p] = 0;
+        sh_print("init: starting ");
+        sh_print(fs[i].name);
+        sh_print("\n");
+        int st = init_run_file(path, "init");
+        if (st > 0 && !worst) worst = st;
+    }
+    return worst;
+}
+
+/* boot sequence: rc.boot, then autostart services. Never fails. */
+static int init_run_boot(void) {
+    init_run_file("/etc/rc.boot", "init");   /* missing = skip */
+    init_run_services();
+    return 0;
+}
+
+static int b_rcinit(int argc, char **argv, const char *in) {
+    (void)in;
+    if (argc == 2 && scmp(argv[1], "list") == 0) {
+        int idx = fs_resolve("/etc/services");
+        int n = 0;
+        if (idx < 0 || !fs[idx].is_dir) {
+            sh_print("no services\n");
+            return 0;
+        }
+        for (int i = 0; i < FS_MAX; i++) {
+            if (!fs[i].used || fs[i].parent != idx || fs[i].is_dir ||
+                i == idx)
+                continue;
+            sh_print(fs[i].name);
+            sh_print("\n");
+            n++;
+        }
+        if (!n) sh_print("no services\n");
+        return 0;
+    }
+    if (argc == 2 && scmp(argv[1], "boot") == 0)
+        return init_run_services();
+    if (argc == 3 && scmp(argv[1], "start") == 0) {
+        static char path[64];
+        int p = 0;
+        const char *t = "/etc/services/";
+        while (*t) path[p++] = *t++;
+        for (int k = 0; argv[2][k] && p < 60; k++)
+            path[p++] = argv[2][k];
+        path[p] = 0;
+        int st = init_run_file(path, "rcinit");
+        if (st < 0) {
+            sh_eprint("rcinit: no such service\n");
+            return 1;
+        }
+        return st;
+    }
+    sh_eprint("Usage: rcinit list | start NAME | boot\n");
+    return 1;
+}
 /* archive scratch: shared with the installer snapshot area (never
  * concurrent: install never calls pkg). Saves 8KB of .bss. */
 #define PKG_ARC ((u8 *)0x40000u)
@@ -2547,6 +2675,7 @@ void shell_run(u32 boot_sec, int verbose) {
     g_boot_sec = boot_sec;
     fs_init();
     users_init();   /* seed root if the DB is absent */
+    init_run_boot();   /* /etc/rc.boot + autostart services */
     smemset(envs, 0, sizeof(envs));
     smemset(hist, 0, sizeof(hist));
     hcount = 0;

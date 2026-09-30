@@ -8,7 +8,7 @@ T=/tmp/opencode/hdimgt
 rm -rf "$T"
 mkdir -p "$T"
 cp "$ROOT/boot.bin" "$ROOT/BOOTX64.EFI" "$T"/
-python3 -c "d=open('$ROOT/kernel.bin','rb').read(); open('/tmp/opencode/hdimg_kern.bin','wb').write(d.ljust(384*512,b'\x00'))"
+python3 -c "d=open('$ROOT/kernel.bin','rb').read(); open('/tmp/opencode/hdimg_kern.bin','wb').write(d.ljust(416*512,b'\x00'))"
 cp /tmp/opencode/hdimg_kern.bin "$T"/kernel.bin
 cd "$T"
 objcopy -I binary -O elf64-x86-64 -B i386 boot.bin bootbind.o

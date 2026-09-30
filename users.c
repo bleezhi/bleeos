@@ -10,8 +10,8 @@
 
 /* on-disk DB: past the OS image (MBR + STAGE2_SECTORS stage2).
  * Keep in sync with STAGE2_SECTORS (Makefile/boot.asm/hdimg.h).
- * Moved with the 320 -> 384 stage2 growth: disks installed by
- * older BleeOS keep their DB at 321 (unread); reinstall to seed. */
+ * Moved with the 320 -> 384 -> 416 growths: disks installed by
+ * older BleeOS keep their DB at 321/385 (unread); reinstall. */
 #define UDISK_LBA (1 + STAGE2_SECTORS)
 #define UDISK_NSEC 5   /* header + passwd(2) + shadow(2) */
 static const char UMAGIC[8] = { 'B','L','E','E','U','S','E','R' };

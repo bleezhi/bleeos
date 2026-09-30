@@ -32,9 +32,18 @@ Boot flow: `boot.asm` (16-bit ASM MBR) → `kernel_entry.asm` (ASM: A20, GDT,
 
 ## Shell commands
 
-`help man echo printf clear uname whoami hostname ver pwd ls cd mkdir touch rm cat env export unset sleep uptime date history true false test exit reboot halt poweroff gui vgaregs curl hls hcat hget hput`
+`help man echo printf clear uname whoami hostname ver pwd ls cd mkdir touch rm cat env export unset sleep uptime date history true false test exit reboot halt poweroff gui vgaregs curl hls hcat hget hput rcinit`
 
 `exit` (or Ctrl+D on an empty line) drops back to the boot manager.
+
+## Init (`rc.boot`, `rcinit`)
+No processes exist, so services are scripts, not daemons.
+`/etc/rc.boot` runs once before the first login; every file in
+`/etc/services/` autostarts at boot too. `service list` names
+them, `service start NAME` runs one now, `service boot` reruns
+all. A failing line is reported (`...: line N failed`) and
+skipped — the boot never aborts. `exit`/`logout` inside scripts
+are shielded from the session.
 
 ## Hard disk (`install` command)
 ATA PIO driver (primary bus, LBA28, polled). The kernel reports a
