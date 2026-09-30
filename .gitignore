@@ -6,4 +6,5 @@ hdd.img
 bleeos.iso
 BOOTX64.EFI
 esp.img
+efiboot.img
 test-uefi.img

@@ -221,12 +221,13 @@ run-hdd: hdd.img
 		-qmp unix:/tmp/opencode/qmp.sock,server,nowait \
 		-drive file=hdd.img,format=raw,if=ide -boot order=c,strict=on -net none
 
-# Bootable ISO: BIOS uses os.img as the El Torito floppy entry, while UEFI
-# uses esp.img as the El Torito EFI System Partition entry.
-iso: os.img esp.img
+# Bootable ISO: BIOS uses os.img as the El Torito floppy entry, while
+# UEFI uses a *raw FAT* El Torito entry (firmware mounts the boot
+# image itself; the MBR wrapper in esp.img would hide the volume).
+iso: os.img efiboot.img
 	mkdir -p iso_root
 	cp os.img iso_root/boot.img
-	cp esp.img iso_root/efiboot.img
+	cp efiboot.img iso_root/efiboot.img
 	cp README.md iso_root/README.TXT
 	mkdir -p iso_root/PKGS
 	cp packages/*.blee iso_root/PKGS/ 2>/dev/null || true
@@ -295,6 +296,10 @@ loaderbind.o: BOOTX64.EFI
 esp.img: BOOTX64.EFI kernel.bin tools/mkesp.py
 	python3 tools/mkesp.py BOOTX64.EFI kernel.bin esp.img
 
+# Raw FAT volume for the ISO's El Torito EFI boot entry (no MBR).
+efiboot.img: BOOTX64.EFI kernel.bin tools/mkesp.py
+	python3 tools/mkesp.py --raw-fat BOOTX64.EFI kernel.bin efiboot.img
+
 # UEFI rig: OVMF + ESP on IDE. Serial mirrors the kernel log
 # (banner, menu); the shell itself uses the GOP framebuffer console.
 run-uefi: esp.img
@@ -307,6 +312,6 @@ run-uefi: esp.img
 
 clean:
 	rm -f boot.bin $(OBJS) $(BOOTBINDS) kernel.elf kernel.bin os.img
-	rm -f uefi/loader.o uefi/tramp.o BOOTX64.EFI esp.img
+	rm -f uefi/loader.o uefi/tramp.o BOOTX64.EFI esp.img efiboot.img
 
 .PHONY: all run run-nographic clean

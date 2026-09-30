@@ -136,15 +136,17 @@ back to busy-poll if the PIT runs but ticks stall (PIC-less
 hardware would otherwise `hlt` forever).
 
 ## ISO (`make iso`, `make run-cd`)
-`bleeos.iso` is built with El Torito floppy emulation (`boot.img` =
-`os.img` plus README.TXT): the BIOS boots it as drive 0, so no
-guest changes are needed and users stay volatile. Tested with
-`run-cd` (`-boot order=d`): boots to the login prompt, root shell
-works.
+`bleeos.iso` carries two El Torito entries: BIOS boots `boot.img`
+(`os.img`) via floppy emulation (boots as drive 0, users stay
+volatile); UEFI boots `efiboot.img`, a raw FAT volume built by
+`mkesp.py --raw-fat` (firmware mounts the boot image itself, so
+the MBR wrapper in `esp.img` must NOT be used there — that was
+the old breakage). Tested both ways: BIOS to login + `ils`,
+UEFI via OVMF to the boot menu.
 The ISO also carries data: `make iso` copies `packages/*.blee`
 into `/PKGS/` on the disc (ISO grows, `kernel.bin` doesn't). The
 guest reads them via ATAPI + ISO9660 (`ils`, `icat`,
-`pkg install-cd /PKGS/HELLO.BLEE`).
+`pkg install-cd /PKGS/HELLO.BLE`).
 
 ## UEFI (`make esp.img`, `make run-uefi`)
 `BOOTX64.EFI` (freestanding x86_64, no gnu-efi — minimal EFI headers

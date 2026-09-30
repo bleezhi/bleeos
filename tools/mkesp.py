@@ -174,11 +174,13 @@ def build(files):
 
 
 def main():
-    if len(sys.argv) != 4:
-        sys.exit("usage: mkesp.py BOOTX64.EFI kernel.bin esp.img")
-    with open(sys.argv[1], "rb") as f:
+    raw = "--raw-fat" in sys.argv
+    args = [a for a in sys.argv[1:] if a != "--raw-fat"]
+    if len(args) != 3:
+        sys.exit("usage: mkesp.py [--raw-fat] BOOTX64.EFI kernel.bin esp.img")
+    with open(args[0], "rb") as f:
         loader = f.read()
-    with open(sys.argv[2], "rb") as f:
+    with open(args[1], "rb") as f:
         kernel = f.read()
     if len(kernel) > STAGE2_SECTORS * SECTOR:
         sys.exit("kernel.bin exceeds stage2 (%d sectors)" % STAGE2_SECTORS)
@@ -187,6 +189,14 @@ def main():
         (("EFI", "BOOT", "BOOTX64.EFI"), loader),
         (("KERNEL.BIN",), kernel),
     ])
+    if raw:
+        # Bare FAT volume for El Torito EFI boot entries: firmware
+        # mounts the boot image itself, so no MBR wrapper allowed.
+        with open(args[2], "wb") as f:
+            f.write(vol)
+        print("efiboot: loader %d + kernel %d -> %s (%d bytes, raw FAT)"
+              % (len(loader), len(kernel), args[2], len(vol)))
+        return
     # MBR wrapper: single 0xEF (ESP) partition; OVMF ignores
     # partitionless superfloppies, so the FAT lives at PART_START.
     img = bytearray((PART_START + len(vol) // SECTOR) * SECTOR)
