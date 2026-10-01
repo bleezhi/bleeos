@@ -14,13 +14,13 @@ OVMF ?= /usr/share/edk2-ovmf/x64/OVMF.4m.fd
 DISPLAY_BACKEND ?= $(if $(or $(DISPLAY),$(WAYLAND_DISPLAY)),sdl,none)
 
 # MBR loads this many sectors (must cover the whole stage2 binary)
-STAGE2_SECTORS=416
+STAGE2_SECTORS=448
 
 CFLAGS=-m32 -march=i386 -mno-mmx -mno-sse -mno-sse2 -ffreestanding -nostdlib -nostartfiles -nodefaultlibs \
        -fno-builtin -fno-stack-protector -fno-pie -no-pie \
        -Wall -Wextra -O2 -std=gnu11
 
-OBJS=kernel_entry.o drivers.o bootmenu.o shell.o kernel.o vbe.o gfx.o mouse.o wm.o apps.o login.o ata.o users.o uhci.o xhci.o xhci_msc.o usb.o tui.o pkg.o doom.o e1000.o net.o tcp.o vt.o term.o irq.o irq_c.o heap.o pci.o amd_display.o fbcon.o hdimg.o fetch.o gpt.o fat.o ext2.o iso.o
+OBJS=kernel_entry.o drivers.o bootmenu.o shell.o kernel.o vbe.o gfx.o mouse.o wm.o apps.o login.o ata.o users.o uhci.o xhci.o xhci_msc.o usb.o tui.o pkg.o doom.o e1000.o net.o tcp.o vt.o term.o irq.o irq_c.o heap.o pci.o amd_display.o fbcon.o hdimg.o fetch.o gpt.o fat.o ext2.o iso.o nvme.o
 # install blobs: boot.bin (MBR for HD targets) + BOOTX64.EFI (ESP for HD
 # targets), embedded as binary objects for the installer backend
 BOOTBINDS=bootbind.o loaderbind.o
@@ -131,6 +131,9 @@ ext2.o: ext2.c ext2.h drivers.h
 xhci_msc.o: xhci_msc.c xhci_msc.h xhci.h drivers.h
 	$(CC) $(CFLAGS) -c xhci_msc.c -o xhci_msc.o
 
+nvme.o: nvme.c nvme.h pci.h drivers.h
+	$(CC) $(CFLAGS) -c nvme.c -o nvme.o
+
 term.o: term.c wm.h gfx.h vt.h shell.h drivers.h
 	$(CC) $(CFLAGS) -c term.c -o term.o
 
@@ -185,8 +188,6 @@ run-nographic: os.img
 # PS/2 stays the input path (see `usb` command).
 run-usb: os.img
 	$(QEMU) -machine accel=kvm:tcg -vga std -display none \
-		-monitor unix:/tmp/opencode/qemu-mon,server,nowait \
-		-qmp unix:/tmp/opencode/qmp.sock,server,nowait \
 		-device piix3-usb-uhci -device usb-kbd -device usb-mouse \
 		-drive file=os.img,format=raw,if=floppy -boot order=a,strict=on -net none
 
@@ -194,8 +195,6 @@ run-usb: os.img
 # enumerates HID devices here; USB keys also reach the shell.
 run-xhci: os.img
 	$(QEMU) -machine accel=kvm:tcg -vga std -display none \
-		-monitor unix:/tmp/opencode/qemu-mon,server,nowait \
-		-qmp unix:/tmp/opencode/qmp.sock,server,nowait \
 		-device qemu-xhci -device usb-kbd -device usb-mouse \
 		-drive file=os.img,format=raw,if=floppy -boot order=a,strict=on -net none
 
@@ -208,17 +207,15 @@ hdd.img:
 # \t\tRight now im just trying to get the commands working
 # \t\t- Luted
 
+# hi guys i just came here to delete the opencode mentions because run-* wont work without opencode NOT running
+# - bleez
 run-install: os.img hdd.img
 	$(QEMU) -machine accel=kvm:tcg -vga std -display $(DISPLAY_BACKEND) \
-		-monitor unix:/tmp/opencode/qemu-mon,server,nowait \
-		-qmp unix:/tmp/opencode/qmp.sock,server,nowait \
 		-drive file=os.img,format=raw,if=floppy -boot order=a,strict=on \
 		-drive file=hdd.img,format=raw,if=ide -net none
 
 run-hdd: hdd.img
 	$(QEMU) -machine accel=kvm:tcg -vga std -display none \
-		-monitor unix:/tmp/opencode/qemu-mon,server,nowait \
-		-qmp unix:/tmp/opencode/qmp.sock,server,nowait \
 		-drive file=hdd.img,format=raw,if=ide -boot order=c,strict=on -net none
 
 # Bootable ISO: BIOS uses os.img as the El Torito floppy entry, while
@@ -240,16 +237,12 @@ iso: os.img efiboot.img
 
 run-cd: bleeos.iso
 	$(QEMU) -machine accel=kvm:tcg -vga std -display none \
-		-monitor unix:/tmp/opencode/qemu-mon,server,nowait \
-		-qmp unix:/tmp/opencode/qmp.sock,server,nowait \
 		-cdrom bleeos.iso -boot order=d,strict=on -net none
 
 # Network rig: E1000 on user-mode networking (SLIRP LAN
 # 10.0.2.0/24, guest .15, gateway .2). `net`, `ping 10.0.2.2`.
 run-net: os.img
 	$(QEMU) -machine accel=kvm:tcg -vga std -display none \
-		-monitor unix:/tmp/opencode/qemu-mon,server,nowait \
-		-qmp unix:/tmp/opencode/qmp.sock,server,nowait \
 		-netdev user,id=n0 -device e1000,netdev=n0 \
 		-drive file=os.img,format=raw,if=floppy -boot order=a,strict=on -net none
 
@@ -259,9 +252,7 @@ run-net: os.img
 # which BleeOS doesn't drive, so typed keys would never reach the guest.
 run-debug: os.img
 	$(QEMU) -machine accel=kvm:tcg -vga std -display none \
-		-monitor unix:/tmp/opencode/qemu-mon,server,nowait \
-		-qmp unix:/tmp/opencode/qmp.sock,server,nowait \
-		-serial file:/tmp/opencode/serial.log \
+		-serial stdio \
 		-drive file=os.img,format=raw,if=floppy -boot order=a,strict=on -net none
 
 # ---- UEFI boot (WIP): BOOTX64.EFI loader + kernel.bin on a FAT16 ESP ----
@@ -305,9 +296,6 @@ efiboot.img: BOOTX64.EFI kernel.bin tools/mkesp.py
 run-uefi: esp.img
 	$(QEMU64) -machine accel=kvm:tcg -m 128 -vga std -display $(DISPLAY_BACKEND) \
 		-bios $(OVMF) \
-		-monitor unix:/tmp/opencode/qemu-mon,server,nowait \
-		-qmp unix:/tmp/opencode/qmp.sock,server,nowait \
-		-serial file:/tmp/opencode/serial-uefi.log \
 		-drive file=esp.img,format=raw,if=ide -boot order=c,strict=on -net none
 
 clean:

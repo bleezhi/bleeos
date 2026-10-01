@@ -8,7 +8,7 @@
 [BITS 16]
 [ORG 0x7C00]
 
-STAGE2_SECTORS equ 416
+STAGE2_SECTORS equ 448
 STAGE2_LBA     equ 1
 CHUNK_SECTORS  equ 32              ; 16KB per EDD call, segment-contained
 

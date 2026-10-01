@@ -877,6 +877,7 @@ static int b_users(int argc, char **argv, const char *in);
 static int b_usb(int argc, char **argv, const char *in);
 static int b_uls(int argc, char **argv, const char *in);
 static int b_ucat(int argc, char **argv, const char *in);
+static int b_nvme(int argc, char **argv, const char *in);
 static int b_run(int argc, char **argv, const char *in);
 static int b_rcinit(int argc, char **argv, const char *in);
 static int b_pkg(int argc, char **argv, const char *in);
@@ -986,6 +987,13 @@ static const char MAN_ULS[] =
     "Usage: uls [DIR] | ucat FILE\n"
     "Mounts partition 0 of the first USB mass-storage disk\n"
     "(8.3 names, DIR/FILE paths). Try: uls then ucat file.\n";
+static const char MAN_NVME[] =
+    "nvme - NVMe storage status and sector reads\n"
+    "Usage: nvme [read LBA | write LBA]\n"
+    "With no args shows model, block size and namespace size.\n"
+    "read dumps the first 64 bytes of one block (try: nvme,\n"
+    "then nvme read 0). write stores a pattern and reads it\n"
+    "back with verification. Needs -device nvme in QEMU.\n";
 static const char MAN_NET[] =
     "net - network status\nUsage: net\n"
     "Shows E1000 MAC, static IP (10.0.2.15/24, SLIRP LAN),\n"
@@ -1104,6 +1112,7 @@ static const cmd_t cmds[] = {
     {"usb", "USB devices", MAN_USB, b_usb},
     {"uls", "list USB FAT files", MAN_ULS, b_uls},
     {"ucat", "print USB FAT file", MAN_ULS, b_ucat},
+    {"nvme", "NVMe storage", MAN_NVME, b_nvme},
     {"run", "run script file", MAN_RUN, b_run},
     {"rcinit", "boot scripts and services", MAN_RCINIT, b_rcinit},
     {"pkg", "package manager", MAN_PKG, b_pkg},
@@ -1210,6 +1219,7 @@ static int b_gui(int argc, char **argv, const char *in) {    (void)argc; (void)a
 #include "usb.h"
 #include "xhci.h"
 #include "xhci_msc.h"
+#include "nvme.h"
 /* shared 2K file workspace (defined here, used by usb + hd commands) */
 static u8 hd_buf[2048];
 static void hls_cb(const char *name, u8 attr, u32 size, void *ctx);
@@ -2240,6 +2250,73 @@ static int b_ucat(int argc, char **argv, const char *in) {
     }
     for (u32 i = 0; i < len; i++) sh_putc((char)hd_buf[i]);
     return 0;
+}
+
+/* ---- NVMe storage ---- */
+static u8 nvme_blk[4096];   /* .bss: one-block read workspace */
+static int b_nvme(int argc, char **argv, const char *in) {
+    nvme_dev_t d;
+    char num[12];
+    (void)in;
+    if (nvme_info(&d)) {
+        sh_eprint("nvme: no NVMe controller found (try -device nvme)\n");
+        return 1;
+    }
+    if (argc == 1) {
+        sh_print("nvme: ");
+        sh_print(d.model);
+        sh_putc('\n');
+        sh_print("block ");
+        sh_print(sutoa(d.block_size, num, 10, 0));
+        sh_print(" x ");
+        sh_print(sutoa(d.ns_blocks, num, 10, 0));
+        sh_print(" (");
+        sh_print(sutoa(d.ns_blocks / 2048u, num, 10, 0));
+        sh_print(" MB)\n");
+        return 0;
+    }
+    if (argc == 3 && scmp(argv[1], "read") == 0) {
+        u32 lba = (u32)sazi(argv[2]);
+        if (nvme_read(lba, nvme_blk, 1)) {
+            sh_eprint("nvme: read failed\n");
+            return 1;
+        }
+        for (int i = 0; i < 64; i++) {
+            const char *h;
+            if (i % 16 == 0) {
+                sh_print(sutoa(lba * d.block_size + (u32)i, num, 16, 0));
+                sh_print(": ");
+            }
+            h = sutoa(nvme_blk[i], num, 16, 0);
+            if (nvme_blk[i] < 16)
+                sh_putc('0');
+            sh_print(h);
+            sh_putc(i % 16 == 15 ? '\n' : ' ');
+        }
+        return 0;
+    }
+    if (argc == 3 && scmp(argv[1], "write") == 0) {
+        /* write a self-describing pattern, read back, verify */
+        u32 lba = (u32)sazi(argv[2]);
+        u32 n = d.block_size > sizeof(nvme_blk) ? sizeof(nvme_blk) :
+            d.block_size;
+        for (u32 i = 0; i < n; i++)
+            nvme_blk[i] = (u8)(0xA5 + i + lba);
+        if (nvme_write(lba, nvme_blk, 1) ||
+            nvme_read(lba, nvme_blk, 1)) {
+            sh_eprint("nvme: write/readback failed\n");
+            return 1;
+        }
+        for (u32 i = 0; i < n; i++)
+            if (nvme_blk[i] != (u8)(0xA5 + i + lba)) {
+                sh_eprint("nvme: verify MISMATCH\n");
+                return 1;
+            }
+        sh_print("nvme: write+verify ok\n");
+        return 0;
+    }
+    sh_eprint("Usage: nvme [read LBA | write LBA]\n");
+    return 1;
 }
 
 static void print_ip(u32 ip) {

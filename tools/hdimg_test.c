@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include "../hdimg.h"
 
-u8 kern_file_buf[416 * 512];
+u8 kern_file_buf[448 * 512];
 
 int main(void) {
     FILE *kf = fopen("/tmp/opencode/hdimg_kern.bin", "rb");
