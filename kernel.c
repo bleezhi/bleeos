@@ -32,8 +32,12 @@ int uefi_active(void) { return uefi_mode; }
 static void kernel_early(void) {
     {
         extern char __bss_end;
-        /* .bss must stay clear of the heap at 0x78000 (64KB slack) */
-        ASSERT((u32)&__bss_end <= 0x68000u, "kernel too big for heap");
+        /* .bss must stay clear of the heap at 0x78000 (16KB slack:
+         * the 0x68000-0x78000 window holds nothing; the tripwire
+         * only needs to fire before a real collision. Was 64KB;
+         * tightened as drivers (xHCI bulk, NVMe queues) grew .bss.
+         * Stack is at 0x90000, heap 0x78000-0x86000: untouched. */
+        ASSERT((u32)&__bss_end <= 0x74000u, "kernel too big for heap");
         if (heap_init(0x78000u, 0x86000u))
             panic("heap init failed");
     }

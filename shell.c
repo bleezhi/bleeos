@@ -875,6 +875,8 @@ static int b_useradd(int argc, char **argv, const char *in);
 static int b_userdel(int argc, char **argv, const char *in);
 static int b_users(int argc, char **argv, const char *in);
 static int b_usb(int argc, char **argv, const char *in);
+static int b_uls(int argc, char **argv, const char *in);
+static int b_ucat(int argc, char **argv, const char *in);
 static int b_run(int argc, char **argv, const char *in);
 static int b_rcinit(int argc, char **argv, const char *in);
 static int b_pkg(int argc, char **argv, const char *in);
@@ -974,10 +976,16 @@ static const char MAN_USERS[] =
     "  su [NAME]     switch user (password unless root)\n"
     "Default login: root / root. GUI login uses the same DB.\n";
 static const char MAN_USB[] =
-    "usb - UHCI detector (stub)\nUsage: usb [probe]\n"
-    "Shows the UHCI controller I/O base and per-port attach\n"
-    "state. No transfers, no enumeration: PS/2 stays the input\n"
-    "path. Needs -device piix3-usb-uhci to show anything.\n";
+    "usb - USB HID + mass-storage status\nUsage: usb\n"
+    "Scans xHCI/UHCI: HID keyboards/mice plus BOT disks\n"
+    "(vendor, product, blocks x block-size). Needs\n"
+    "-device qemu-xhci with -device usb-storage for disks.\n"
+    "See also: uls, ucat (FAT files on the USB disk).";
+static const char MAN_ULS[] =
+    "uls/ucat - FAT files on the USB disk\n"
+    "Usage: uls [DIR] | ucat FILE\n"
+    "Mounts partition 0 of the first USB mass-storage disk\n"
+    "(8.3 names, DIR/FILE paths). Try: uls then ucat file.\n";
 static const char MAN_NET[] =
     "net - network status\nUsage: net\n"
     "Shows E1000 MAC, static IP (10.0.2.15/24, SLIRP LAN),\n"
@@ -1094,6 +1102,8 @@ static const cmd_t cmds[] = {
     {"userdel", "delete user", MAN_USERS, b_userdel},
     {"users", "list users", MAN_USERS, b_users},
     {"usb", "USB devices", MAN_USB, b_usb},
+    {"uls", "list USB FAT files", MAN_ULS, b_uls},
+    {"ucat", "print USB FAT file", MAN_ULS, b_ucat},
     {"run", "run script file", MAN_RUN, b_run},
     {"rcinit", "boot scripts and services", MAN_RCINIT, b_rcinit},
     {"pkg", "package manager", MAN_PKG, b_pkg},
@@ -1197,6 +1207,15 @@ static int b_gui(int argc, char **argv, const char *in) {    (void)argc; (void)a
 #include "hdimg.h"
 #include "gpt.h"
 #include "fat.h"
+#include "usb.h"
+#include "xhci.h"
+#include "xhci_msc.h"
+/* shared 2K file workspace (defined here, used by usb + hd commands) */
+static u8 hd_buf[2048];
+static void hls_cb(const char *name, u8 attr, u32 size, void *ctx);
+static int hd_resolve(fat_vol_t *v, const char *path, u32 *dir_out,
+                      char *leaf);
+static int hd_resolve_dir(fat_vol_t *v, const char *path, u32 *dir_out);
 #define INSTALL_CHUNK_SEC 32u
 static u8 inst_chunk[INSTALL_CHUNK_SEC * 512u];
 
@@ -2112,25 +2131,114 @@ static int b_pkg(int argc, char **argv, const char *in) {
 }
 
 static int b_usb(int argc, char **argv, const char *in) {
-    (void)in;
     char num[12];
-    if (!uhci_present()) {
-        sh_print("usb: no UHCI controller found"
-                 " (try -device piix3-usb-uhci)\n");
+    int nmsc;
+    (void)argc; (void)argv; (void)in;
+    usb_scan();
+    sh_print("usb: hid=");
+    sh_print(sitoa(usb_ndev(), num));
+    sh_print(" msc=");
+    nmsc = xhci_msc_ndev();
+    sh_print(sitoa(nmsc, num));
+    sh_putc('\n');
+    for (int i = 0; i < nmsc; i++) {
+        msc_dev_t *d = xhci_msc_get(i);
+        sh_print("disk");
+        sh_print(sitoa(i, num));
+        sh_print(": ");
+        sh_print(xhci_msc_vendor(d));
+        sh_putc(' ');
+        sh_print(xhci_msc_product(d));
+        sh_print(" ");
+        sh_print(sutoa(xhci_msc_capacity(d), num, 10, 0));
+        sh_print("x");
+        sh_print(sutoa(xhci_msc_block_size(d), num, 10, 0));
+        sh_putc('\n');
+    }
+    if (!nmsc)
+        sh_print("hint: QEMU: -device qemu-xhci -device usb-storage,drive=u\n");
+    return 0;
+}
+
+/* ---- FAT-over-USB: sector I/O through the first MSC disk ---- */
+static msc_dev_t *usb_disk(void) {
+    usb_scan();
+    if (!xhci_msc_ndev())
+        return 0;
+    return xhci_msc_get(0);
+}
+static int usb_rd(u32 lba, u8 *out, void *ctx) {
+    msc_dev_t *d = (msc_dev_t *)ctx;
+    if (!d)
+        d = usb_disk();
+    if (!d)
+        return -1;
+    return xhci_msc_read(d, lba, 1, out);
+}
+static int usb_wr(u32 lba, const u8 *in, void *ctx) {
+    msc_dev_t *d = (msc_dev_t *)ctx;
+    if (!d)
+        d = usb_disk();
+    if (!d)
+        return -1;
+    return xhci_msc_write(d, lba, 1, in);
+}
+static int usb_mount(fat_vol_t *v, msc_dev_t **dout) {
+    msc_dev_t *d = usb_disk();
+    if (!d)
+        return -1;
+    if (fat_mount(usb_rd, usb_wr, d, 0, v))
+        return -1;
+    if (dout)
+        *dout = d;
+    return 0;
+}
+static int b_uls(int argc, char **argv, const char *in) {
+    fat_vol_t v;
+    u32 dir = 0;
+    int n;
+    (void)in;
+    if (argc > 2) {
+        sh_eprint("Usage: uls [DIR]\n");
         return 1;
     }
-    sh_print("usb: UHCI @");
-    sh_print(sutoa(uhci_iobase(), num, 10, 0));
-    sh_print(" (stub detector: no transfers, PS/2 active)\n");
-    for (int p = 0; p < uhci_nports(); p++) {
-        int c = uhci_connected(p);
-        sh_print("port");
-        sh_print(sitoa(p, num));
-        sh_print(c > 0 ? ": device attached\n" :
-                 c == 0 ? ": empty\n" : ": error\n");
+    if (usb_mount(&v, 0)) {
+        sh_eprint("uls: no USB FAT disk found\n");
+        return 1;
     }
-    if (argc > 1 && scmp(argv[1], "probe") == 0)
-        sh_print("usb probe: unimplemented (stub detector only)\n");
+    if (argc == 2 && hd_resolve_dir(&v, argv[1], &dir)) {
+        sh_eprint("uls: bad path\n");
+        return 1;
+    }
+    n = fat_list(&v, dir, hls_cb, 0);
+    if (n < 0) {
+        sh_eprint("uls: list failed\n");
+        return 1;
+    }
+    return 0;
+}
+static int b_ucat(int argc, char **argv, const char *in) {
+    fat_vol_t v;
+    u32 dir, len = 0;
+    char leaf[12];
+    (void)in;
+    if (argc != 2) {
+        sh_eprint("Usage: ucat FILE\n");
+        return 1;
+    }
+    if (usb_mount(&v, 0)) {
+        sh_eprint("ucat: no USB FAT disk found\n");
+        return 1;
+    }
+    if (hd_resolve(&v, argv[1], &dir, leaf) || !leaf[0]) {
+        sh_eprint("ucat: bad path\n");
+        return 1;
+    }
+    if (fat_read(&v, dir, leaf, hd_buf, sizeof(hd_buf), &len)) {
+        sh_eprint("ucat: read failed (missing or >2K)\n");
+        return 1;
+    }
+    for (u32 i = 0; i < len; i++) sh_putc((char)hd_buf[i]);
     return 0;
 }
 
@@ -2291,7 +2399,7 @@ static int b_curl(int argc, char **argv, const char *in) {
 }
 
 /* ---- persistent FAT data partition (survives reboots) ---- */
-static u8 hd_buf[2048];   /* .bss: file transfer workspace (shared) */
+/* hd_buf lives near the top (shared with uls/ucat) */
 
 /* mount first FAT data partition (0 ok); ESP fallback is read-only */
 static int hd_mount(fat_vol_t *v, int *ro_out) {

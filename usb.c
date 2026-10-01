@@ -2,6 +2,7 @@
 #include "usb.h"
 #include "uhci.h"
 #include "xhci.h"
+#include "xhci_msc.h"
 #include "drivers.h"
 #define USB_REQ_GET_DESCRIPTOR 6
 #define USB_REQ_SET_ADDRESS 5
@@ -86,8 +87,29 @@ static int enumerate_port(int port) {
 int usb_scan(void) {
     if(scanned)return ndev;scanned=1;ndev=0;xndev=0;
     if(xhci_init()==0){
+        /* pass 1: HID boot devices on even slots */
         for(int p=0;p<xhci_nports()&&xndev<2;p++)
             if(xhci_connected(p)&&xhci_enumerate_port(p,xndev)==0)xndev++;
+        /* pass 2: MSC bulk devices on any free xdev slot */
+        for(int p=0;p<xhci_nports()&&xndev<2;p++) {
+            xdev_t *x;
+            if(!xhci_connected(p))continue;
+            /* skip ports already bound to HID */
+            {
+                int bound=0;
+                for(int i=0;i<xndev;i++){x=xhci_dev_get(i);
+                    if(x&&x->used&&x->port==p+1){bound=1;break;}}
+                if(bound)continue;
+            }
+            if(xhci_enumerate_msc(p,xndev)==0) {
+                if(xhci_msc_init(xndev)==0) {
+                    char b[12];klog("usb: xHCI MSC disk (");
+                    klog(utoa10(xhci_msc_capacity(xhci_msc_get(
+                        xhci_msc_ndev()-1)),b));klog(" blocks)\n");
+                }
+                xndev++;
+            }
+        }
         ndev+=xndev;
     }
     if(uhci_init()==0){

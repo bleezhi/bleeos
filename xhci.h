@@ -48,10 +48,16 @@ typedef struct {
 } ring_t;
 typedef struct {
     int used, index, port, slot, speed;
-    u8 mps;
+    u16 mps;
     int kbd_dci, mse_dci;
     u8 kbd_mps, mse_mps;
     ring_t ep0, kbd, mse;
+    /* mass-storage bulk pipes (MSC/BOT): DCI + MPS + EP addr */
+    int bulk_in_dci, bulk_out_dci;
+    u16 bulk_in_mps, bulk_out_mps;
+    u8 bulk_in_ep, bulk_out_ep;
+    int is_msc, msc_iface;
+    ring_t bulk_in, bulk_out;
     u8 prev[6], mod, caps;
 } xdev_t;
 
@@ -61,6 +67,8 @@ int xhci_nports(void);
 int xhci_ndev(void);
 int xhci_connected(int port);
 int xhci_enumerate_port(int port,int index);
+int xhci_enumerate_msc(int port,int index);
+int xhci_bulk_transfer(int index, int dci, void *buf, u32 len, int in);
 int xhci_hid_trykey(int index,int *out);
 int xhci_hid_mouse(int index,int *dx,int *dy,int *btn);
 int xhci_dev_count(void);

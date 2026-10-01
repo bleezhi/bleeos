@@ -95,6 +95,8 @@ typedef unsigned long long u64;
 #define EP_CTX_CERR (3u << 1)
 #define EP_TYPE_CONTROL (4u << 3)
 #define EP_TYPE_INT_IN (7u << 3)
+#define EP_TYPE_BULK_OUT (2u << 3)
+#define EP_TYPE_BULK_IN (6u << 3)
 
 /* ---- controller state ---- */
 static volatile u8 *mmio;
@@ -115,6 +117,8 @@ __attribute__((aligned(64))) static u8 out_ctx[2][4096];
 __attribute__((aligned(64))) static trb_t ep0_ring[2][EP_N + 1];
 __attribute__((aligned(64))) static trb_t kbd_ring[2][EP_N + 1];
 __attribute__((aligned(64))) static trb_t mse_ring[2][EP_N + 1];
+__attribute__((aligned(64))) static trb_t blk_in_ring[2][EP_N + 1];
+__attribute__((aligned(64))) static trb_t blk_out_ring[2][EP_N + 1];
 
 /* ---- producer ring cursor ---- */
 static int ev_idx, ev_cyc = 1;
@@ -953,6 +957,274 @@ int xhci_enumerate_port(int p, int index) {
     return 0;
 }
 
+/* ---- MSC/BOT bulk enumeration ----
+ * Same front half as HID (reset, enable slot, address, descriptors)
+ * but binds a Mass Storage interface (class 8, subclass 6,
+ * proto 0x50) with exactly one bulk-IN + one bulk-OUT endpoint.
+ * Bulk MPS: HS 512, else 64 (clamped to wMaxPacketSize). */
+int xhci_enumerate_msc(int p, int index) {
+    u8 d[18], cfg[256];
+    int speed, slot, total, pos, config = 0, ifnum = -1;
+    u8 bin_ep = 0, bout_ep = 0;
+    u16 bin_mps = 0, bout_mps = 0;
+    xdev_t *x;
+
+    if (index < 0 || index >= 2) {
+        xlog("invalid MSC slot");
+        return -1;
+    }
+    if (!xhci_connected(p)) {
+        xlog("port not connected");
+        return -1;
+    }
+    if (port_reset(p, &speed)) {
+        xlog("port reset failed");
+        return -1;
+    }
+    if (hce_check("port reset"))
+        return -1;
+    if (speed == 0 || speed > 15) {
+        xlog("invalid USB speed");
+        return -1;
+    }
+    if (speed > 5) {
+        xlog("SuperSpeedPlus device not supported yet");
+        return -1;
+    }
+    x = &devs[index];
+    zero(x, sizeof(*x));
+    x->used = 1;
+    x->index = index;
+    x->port = p + 1;
+    x->speed = speed;
+    /* EP0 MPS: HS 64, SS 512, else 8. SS bMaxPacketSize0 is an
+     * exponent (2^9 = 512); fixed up after the device descriptor. */
+    x->mps = (speed >= 4) ? 512 : (speed == 3) ? 64 : 8;
+    ring_reset(&x->ep0, ep0_ring[index], EP_N);
+    ring_reset0(&x->bulk_in, blk_in_ring[index], EP_N);
+    ring_reset0(&x->bulk_out, blk_out_ring[index], EP_N);
+
+    if (enable_slot(&slot)) {
+        xlog("Enable Slot failed");
+        return -1;
+    }
+    x->slot = slot;
+    if (hce_check("enable slot"))
+        return -1;
+    if (address_device(x, next_usb_addr++)) {
+        xlog("Address Device failed");
+        return -1;
+    }
+    if (hce_check("address device"))
+        return -1;
+    if (getdesc(x, 1, 0, d, 18)) {
+        xlog("device descriptor failed");
+        return -1;
+    }
+    if (d[1] != 1 || d[0] < 8) {
+        xlog("bad device descriptor");
+        return -1;
+    }
+    /* SS bMaxPacketSize0 is an exponent (9 = 512); HS/FS is bytes */
+    if (speed >= 4 && d[7] >= 9 && d[7] <= 16)
+        x->mps = (u16)(1u << d[7]);
+    else
+        x->mps = d[7] ? d[7] : x->mps;
+    if (eval_ep0(x)) {
+        xlog("Evaluate Context failed");
+        return -1;
+    }
+    if (getdesc(x, 2, 0, cfg, 9)) {
+        xlog("config descriptor header failed");
+        return -1;
+    }
+    total = cfg[2] | ((int)cfg[3] << 8);
+    if (total < 9 || total > 256)
+        return -1;
+    if (getdesc(x, 2, 0, cfg, total)) {
+        xlog("config descriptor failed");
+        return -1;
+    }
+    pos = 0;
+    while (pos + 2 <= total) {
+        int l = cfg[pos], t = cfg[pos + 1];
+        if (l < 2 || pos + l > total)
+            break;
+        if (t == 2 && l >= 9)
+            config = cfg[pos + 5];
+        if (t == 4 && l >= 9 && cfg[pos + 5] == 8 && cfg[pos + 6] == 6 &&
+            cfg[pos + 7] == 0x50) {
+            int q = pos + l;
+            ifnum = cfg[pos + 2];
+            while (q + 2 <= total) {
+                int el = cfg[q], et = cfg[q + 1];
+                if (el < 2 || q + el > total)
+                    break;
+                if (et == 4 || et == 2)
+                    break;
+                if (et == 5 && el >= 7 && ((cfg[q + 3] & 3) == 2)) {
+                    u8 ep = (u8)(cfg[q + 2] & 15);
+                    u16 mp = (u16)cfg[q + 4] |
+                        ((u16)(cfg[q + 5] & 7) << 8);
+                    u16 mpmax = (speed >= 4) ? 1024 : 512;
+                    if (!mp)
+                        mp = (speed >= 4) ? 1024 :
+                            (speed == 3) ? 512 : 64;
+                    if (cfg[q + 2] & 0x80) {
+                        if (!bin_ep) {
+                            bin_ep = ep;
+                            bin_mps = mp > mpmax ? mpmax : mp;
+                        }
+                    } else {
+                        if (!bout_ep) {
+                            bout_ep = ep;
+                            bout_mps = mp > mpmax ? mpmax : mp;
+                        }
+                    }
+                }
+                q += el;
+            }
+        }
+        pos += l;
+    }
+    if (!config || ifnum < 0 || !bin_ep || !bout_ep) {
+        xlog("no MSC bulk interface");
+        return -1;
+    }
+    if (setcfg(x, (u8)config)) {
+        xlog("Set Configuration failed");
+        return -1;
+    }
+    /* Configure bulk endpoints: CErr=3, interval 0, DCS=1 */
+    {
+        int top, rc;
+        int bin_dci = (int)bin_ep * 2 + 1;
+        int bout_dci = (int)bout_ep * 2;
+        top = bin_dci > bout_dci ? bin_dci : bout_dci;
+        if (top < 1)
+            top = 1;
+        zero(in_ctx, sizeof(in_ctx));
+        {
+            u32 *ic = (u32 *)in_ctx;
+            ic[1] = 1u << 0;
+            for (int e = 2; e <= top; e++)
+                ic[1] |= 1u << e;
+        }
+        ctx_wr(1, ((u32)speed << 20) | ((u32)top << 27),
+               (u32)x->port << 16, 0, 0);
+        ctx_wr((u32)bout_dci + 1u,
+               EP_CTX_CERR, EP_TYPE_BULK_OUT | ((u32)bout_mps << 16),
+               phys(x->bulk_out.t) | 1u, (u32)bout_mps);
+        ctx_wr((u32)bin_dci + 1u,
+               EP_CTX_CERR, EP_TYPE_BULK_IN | ((u32)bin_mps << 16),
+               phys(x->bulk_in.t) | 1u, (u32)bin_mps);
+        rc = command((u32)phys(in_ctx), (u32)(phys(in_ctx) >> 32), 0,
+                     TRB_C_CONFIG_EP | ((u32)slot << 24), 0);
+        if (rc) {
+            xlog("configure bulk endpoints failed");
+            return -1;
+        }
+        x->bulk_in_dci = bin_dci;
+        x->bulk_out_dci = bout_dci;
+        x->bulk_in_mps = bin_mps;
+        x->bulk_out_mps = bout_mps;
+        x->bulk_in_ep = bin_ep;
+        x->bulk_out_ep = bout_ep;
+        x->is_msc = 1;
+        x->msc_iface = ifnum;
+        /* mirror to output ctx (same DCI-indexed layout as HID) */
+        {
+            u8 *base = out_ctx[x->index];
+            u32 *p = (u32 *)(base + (u32)bout_dci * (u32)ctx_size);
+            p[0] = EP_CTX_CERR | 1u;
+            p[1] = EP_TYPE_BULK_OUT | ((u32)bout_mps << 16);
+            p[2] = (u32)phys(x->bulk_out.t) | 1u;
+            p[3] = 0;
+            p[4] = bout_mps;
+            p = (u32 *)(base + (u32)bin_dci * (u32)ctx_size);
+            p[0] = EP_CTX_CERR | 1u;
+            p[1] = EP_TYPE_BULK_IN | ((u32)bin_mps << 16);
+            p[2] = (u32)phys(x->bulk_in.t) | 1u;
+            p[3] = 0;
+            p[4] = bin_mps;
+        }
+        xlog("bulk endpoints configured");
+    }
+    if (hce_check("configure"))
+        return -1;
+    if (index >= ndev)
+        ndev = index + 1;
+    xlog("MSC device ready");
+    return 0;
+}
+
+/* bulk transfer with HID-completion preservation: keys arriving
+ * mid-transfer are stashed to k_done/m_done instead of dropped */
+static int k_done[2], m_done[2];
+static u32 k_code[2], m_code[2];
+int xhci_bulk_transfer(int index, int dci, void *buf, u32 len, int in) {
+    xdev_t *x;
+    ring_t *r;
+    trb_t *t;
+    u32 want;
+    (void)in;
+    if (index < 0 || index >= 2)
+        return -1;
+    x = &devs[index];
+    if (!x->used || !x->slot)
+        return -1;
+    r = (dci == x->bulk_in_dci) ? &x->bulk_in : &x->bulk_out;
+    t = ring_put(r, (u32)phys(buf), (u32)(phys(buf) >> 32), len,
+                 TRB_T_NORMAL | TRB_IOC);
+    rw(db + (u32)x->slot * 4u, (u32)dci);
+    want = (u32)phys(t);
+    for (int i = 0; i < 5000; i++) {
+        u32 type, sl, dc, cc;
+        trb_t *e;
+        if (!ev_next(&type, &sl, &dc, &cc)) {
+            sleep_ms(1);
+            continue;
+        }
+        if (type != EV_TRANSFER)
+            continue;
+        e = &event_ring[(ev_idx + EV_N - 1) % EV_N];
+        /* stash HID completions so input never wedges mid-transfer */
+        {
+            int hid = 0;
+            for (int k = 0; k < 2; k++) {
+                if (!devs[k].used)
+                    continue;
+                if (devs[k].kbd_dci &&
+                    sl == (u32)devs[k].slot &&
+                    dc == (u32)devs[k].kbd_dci &&
+                    (unsigned int)e->a == (unsigned int)k_last[k]) {
+                    k_done[k] = 1;
+                    k_code[k] = cc;
+                    hid = 1;
+                    break;
+                }
+                if (devs[k].mse_dci &&
+                    sl == (u32)devs[k].slot &&
+                    dc == (u32)devs[k].mse_dci &&
+                    (unsigned int)e->a == (unsigned int)m_last[k]) {
+                    m_done[k] = 1;
+                    m_code[k] = cc;
+                    hid = 1;
+                    break;
+                }
+            }
+            if (hid)
+                continue;
+        }
+        if (sl != (u32)x->slot || dc != (u32)dci)
+            continue;
+        if ((unsigned int)e->a != (unsigned int)want)
+            continue;
+        return (cc == COMP_SUCCESS || cc == COMP_SHORT) ? 0 : -1;
+    }
+    return -1;
+}
+
 /* ---- interrupt-IN polling ---- */
 static void queue_intr(xdev_t *x, ring_t *ring, int dci, void *buf,
                        int len, u32 *last) {
@@ -969,8 +1241,6 @@ static void queue_intr(xdev_t *x, ring_t *ring, int dci, void *buf,
  * the text shell only the keyboard polls, which is why USB input
  * worked there but died in the GUI). One pump dispatches transfer
  * events to per-endpoint slots instead. */
-static int k_done[2], m_done[2];
-static u32 k_code[2], m_code[2];
 static void hid_pump(void) {
     u32 type, sl, dc, cc;
     while (ev_next(&type, &sl, &dc, &cc)) {
