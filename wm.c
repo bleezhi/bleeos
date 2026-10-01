@@ -11,17 +11,38 @@
 #define TITLE_H 20
 #define BORDER 2
 
-#define C_DESK   RGB(16, 32, 64)
-#define C_DESK2  RGB(20, 40, 80)
-#define C_BAR    RGB(8, 16, 32)
-#define C_BORD   RGB(180, 190, 200)
-#define C_TACT   RGB(30, 90, 200)
-#define C_TINACT RGB(110, 120, 130)
+/* 90s desktop palette: gray faces, white/black bevels, navy titles */
+#define C_DESK   RGB(0, 128, 128)
+#define C_FACE   RGB(192, 192, 192)
+#define C_HI     RGB(255, 255, 255)
+#define C_SH     RGB(128, 128, 128)
+#define C_BAR    C_FACE
+#define C_BORD   C_FACE
+#define C_TACT   RGB(0, 0, 128)
+#define C_TINACT RGB(128, 128, 128)
 #define C_TTEXT  RGB(255, 255, 255)
-#define C_CLOSE  RGB(200, 60, 50)
-#define C_CLIENT RGB(240, 240, 235)
+#define C_TXT    RGB(0, 0, 0)
+#define C_CLOSE  C_FACE
+#define C_CLIENT RGB(255, 255, 255)
 #define C_CURSOR RGB(255, 255, 255)
 #define C_COUT   RGB(0, 0, 0)
+
+/* raised 90s bevel: white top/left, black bottom/right (1px each) */
+static void bevel_up(int x, int y, int w, int h) {
+    if (w < 2 || h < 2) return;
+    gfx_hline(x, y, w, C_HI);
+    gfx_vline(x, y, h, C_HI);
+    gfx_hline(x, y + h - 1, w, C_COUT);
+    gfx_vline(x + w - 1, y, h, C_COUT);
+}
+/* sunken 90s bevel: black top/left, white bottom/right */
+static void bevel_down(int x, int y, int w, int h) {
+    if (w < 2 || h < 2) return;
+    gfx_hline(x, y, w, C_COUT);
+    gfx_vline(x, y, h, C_COUT);
+    gfx_hline(x, y + h - 1, w, C_HI);
+    gfx_vline(x + w - 1, y, h, C_HI);
+}
 
 static win_t wins[MAXWIN];
 static int order[MAXWIN];   /* bottom->top window indices */
@@ -165,8 +186,9 @@ static void draw_menu(void) {
     if (y + MENU_H > gfx_h()) y = gfx_h() - MENU_H;
     if (x < 0) x = 0;
     if (y < 0) y = 0;
-    gfx_fill(x, y, MENU_W, MENU_H, C_BORD);
-    gfx_fill(x + 1, y + 1, MENU_W - 2, MENU_H - 2, C_BAR);
+    gfx_fill(x, y, MENU_W, MENU_H, C_FACE);
+    bevel_up(x, y, MENU_W, MENU_H);
+    gfx_fill(x + 2, y + 2, MENU_W - 4, MENU_H - 4, C_FACE);
     menu_x = x; menu_y = y;   /* remember clamped pos for hit test */
     menu_hover = -1;
     for (int i = 0; i < MENU_N; i++) {
@@ -177,7 +199,8 @@ static void draw_menu(void) {
             menu_hover = i;
             gfx_fill(x + 3, iy, MENU_W - 6, 22, C_TACT);
         }
-        gfx_text(x + 12, iy + 7, menu_items[i], C_TTEXT, GFX_TRANS);
+        gfx_text(x + 12, iy + 7, menu_items[i],
+                 hov ? C_TTEXT : C_TXT, GFX_TRANS);
     }
 }
 
@@ -201,13 +224,11 @@ static void draw_cursor(void) {
 static void draw_all(void) {
     int W = gfx_w(), H = gfx_h();
     gfx_noclip();
-    /* desktop: two-tone 16px bands (one fill + band fills, not 480 hlines) */
-    gfx_fill(0, 0, W, H, C_DESK2);
-    for (int y = 0; y < H; y += 32)
-        gfx_fill(0, y + 16, W, 16, C_DESK);
-    /* hint bar with user (left) and live clock (right) */
+    /* desktop: flat 90s teal */
+    gfx_fill(0, 0, W, H, C_DESK);
+    /* taskbar: raised gray bar with user (left) and live clock (right) */
     gfx_fill(0, H - 22, W, 22, C_BAR);
-    gfx_hline(0, H - 22, W, C_BORD);
+    gfx_hline(0, H - 22, W, C_HI);
     {
         char left[48], clock[20];
         int i = 0;
@@ -216,24 +237,26 @@ static void draw_all(void) {
         left[i++] = 'b'; left[i++] = 'l'; left[i++] = 'e';
         left[i++] = 'e'; left[i++] = 'o'; left[i++] = 's';
         left[i] = 0;
-        gfx_text(8, H - 15, left, RGB(140, 220, 140), GFX_TRANS);
+        gfx_text(8, H - 15, left, C_TXT, GFX_TRANS);
         gfx_text(8 + gfx_textw(left) + 16, H - 15, "right-click: menu",
-                 RGB(200, 210, 220), GFX_TRANS);
+                 C_TXT, GFX_TRANS);
         rtc_format(clock);
-        gfx_text(W - 8 - 19 * 8, H - 15, clock, RGB(200, 210, 220), GFX_TRANS);
+        gfx_text(W - 8 - 19 * 8, H - 15, clock, C_TXT, GFX_TRANS);
     }
     for (int oi = 0; oi < norder; oi++) {
         win_t *w = &wins[order[oi]];
         int top = (oi == norder - 1);
         u32 bar = top ? C_TACT : C_TINACT;
-        gfx_fill(w->x, w->y, w->w, w->h, C_BORD);              /* border */
+        gfx_fill(w->x, w->y, w->w, w->h, C_FACE);                /* face */
+        bevel_up(w->x, w->y, w->w, w->h);                        /* frame */
         gfx_fill(w->x + BORDER, w->y + BORDER,
-                 w->w - 2 * BORDER, TITLE_H - BORDER, bar);    /* title */
+                 w->w - 2 * BORDER, TITLE_H - BORDER, bar);      /* title */
         gfx_text(w->x + 8, w->y + 2 + 6, w->title, C_TTEXT, GFX_TRANS);
-        /* close button */
+        /* close button: mini raised face button, black X */
         int bx = w->x + w->w - 18, by = w->y + 2;
         gfx_fill(bx, by, 16, 16, C_CLOSE);
-        gfx_text(bx + 4, by + 4, "X", C_TTEXT, GFX_TRANS);
+        bevel_up(bx, by, 16, 16);
+        gfx_text(bx + 4, by + 4, "X", C_TXT, GFX_TRANS);
         /* client */
         int cx = w->x + BORDER, cy = w->y + TITLE_H;
         gfx_fill(cx, cy, w->w - 2 * BORDER, w->h - TITLE_H - BORDER, C_CLIENT);

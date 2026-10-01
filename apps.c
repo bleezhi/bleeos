@@ -6,8 +6,8 @@
 #include "shell.h"
 
 #define INK RGB(20, 20, 20)
-#define BTN RGB(60, 120, 220)
-#define BTN_T RGB(255, 255, 255)
+#define BTN RGB(192, 192, 192)
+#define BTN_T RGB(0, 0, 0)
 
 
 /* ---------- AAP: GUI ASCII animation editor ---------- */
@@ -37,9 +37,9 @@ static void aap_copy_frame(int from, int to) {
     for (int i = 0; i < AAP_W * AAP_H; i++) aap_frames[to][i] = aap_frames[from][i];
 }
 static void aap_draw_button(int cx, int cy, int x, int y, int w, const char *s, int active) {
-    gfx_fill(cx + x, cy + y, w, 24, active ? RGB(40, 160, 70) : RGB(60, 120, 220));
+    gfx_fill(cx + x, cy + y, w, 24, active ? RGB(40, 160, 70) : BTN);
     gfx_rect(cx + x, cy + y, w, 24, INK);
-    gfx_text(cx + x + (w - gfx_textw(s)) / 2, cy + y + 8, s, RGB(255,255,255), GFX_TRANS);
+    gfx_text(cx + x + (w - gfx_textw(s)) / 2, cy + y + 8, s, active ? RGB(255,255,255) : INK, GFX_TRANS);
 }
 static void aap_draw(win_t *w, int cx, int cy) {
     (void)w;
@@ -60,7 +60,7 @@ static void aap_draw(win_t *w, int cx, int cy) {
     }
     /* cursor */
     gfx_rect(cx + AAP_X + aap_x * AAP_CW, cy + AAP_Y + aap_y * AAP_CH,
-             AAP_CW, AAP_CH, RGB(30,90,200));
+             AAP_CW, AAP_CH, RGB(0, 0, 128));
 
     /* timeline */
     gfx_text(cx + 14, cy + AAP_TIMELINE_Y - 18, "FRAMES", INK, GFX_TRANS);
@@ -289,11 +289,11 @@ static void calc_draw(win_t *w, int cx, int cy) {
         for (int c = 0; c < 4; c++) {
             int bx = cx + CALC_X0 + c * (CALC_CW + 6);
             int by = cy + CALC_Y0 + r * (CALC_CH + 6);
-            gfx_fill(bx, by, CALC_CW, CALC_CH, RGB(60, 120, 220));
+            gfx_fill(bx, by, CALC_CW, CALC_CH, BTN);
             gfx_rect(bx, by, CALC_CW, CALC_CH, RGB(20, 20, 20));
             char s[2] = { calc_keys[r][c], 0 };
             gfx_text(bx + CALC_CW / 2 - 4, by + 9, s,
-                     RGB(255, 255, 255), GFX_TRANS);
+                     BTN_T, GFX_TRANS);
         }
     }
 }
@@ -427,9 +427,9 @@ static void disp_draw(win_t *w, int cx, int cy) {
         disp_slot(i, &bx, &by, &bw);
         int cur = gfx_w() == m[0] && gfx_h() == m[1];
         gfx_fill(cx + bx, cy + by, bw, DISP_BTN_H,
-                 cur ? RGB(40, 160, 70) : RGB(60, 120, 220));
+                 cur ? RGB(40, 160, 70) : BTN);
         gfx_rect(cx + bx, cy + by, bw, DISP_BTN_H, RGB(20, 20, 20));
-        gfx_text(cx + bx + 10, cy + by + 9, b, RGB(255, 255, 255), GFX_TRANS);
+        gfx_text(cx + bx + 10, cy + by + 9, b, cur ? RGB(255,255,255) : INK, GFX_TRANS);
     }
     /* Custom button: shows the typed WxH + cursor while editing */
     {
@@ -442,9 +442,9 @@ static void disp_draw(win_t *w, int cx, int cy) {
         b[k] = 0;
         int by = cy + disp_custom_y();
         gfx_fill(cx + 16, by, 200, 26,
-                 disp_custom ? RGB(30, 90, 170) : RGB(90, 90, 160));
+                 disp_custom ? RGB(0, 0, 128) : BTN);
         gfx_rect(cx + 16, by, 200, 26, RGB(20, 20, 20));
-        gfx_text(cx + 26, by + 9, b, RGB(255, 255, 255), GFX_TRANS);
+        gfx_text(cx + 26, by + 9, b, disp_custom ? RGB(255,255,255) : INK, GFX_TRANS);
     }
     if (disp_err)
         gfx_text(cx + 16, cy + disp_custom_y() + 34, "320-1920 x 200-1200",
@@ -725,7 +725,7 @@ static void filer_draw(win_t *w, int cx, int cy) {
         int thumb_off = range ? (filer.top * (sb_h - FILER_ROW_H)) / range : 0;
         gfx_fill(sb_x, sb_y, 10, sb_h, RGB(220, 220, 220));
         gfx_fill(sb_x, sb_y + thumb_off, 10, FILER_ROW_H,
-                 RGB(60, 120, 220));
+                 RGB(128, 128, 128));
     }
 }
 
